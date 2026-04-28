@@ -1,0 +1,28 @@
+# --- Python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# --- Node / Next.js (defense-in-depth; apps/frontend has its own too) ---
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- Secrets / env ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Editors ---
+.idea/
+.vscode/
+.DS_Store

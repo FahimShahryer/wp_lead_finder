@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__context7__resolve-library-id",
+      "mcp__context7__query-docs",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(curl -fsS http://localhost:8000/health)",
+      "Bash(awk -F= '/^OPENAI_API_KEY=/ {print \"value length:\", length\\($2\\)}' /d/Projects/wp2/.env)",
+      "Read(//d/Projects/wp2/**)",
+      "Bash(curl -fsS -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:3000)",
+      "Bash(curl -fsS http://localhost:3000)",
+      "Bash(curl -fsS http://localhost:3000 -o /dev/null -w \"HTTP %{http_code}, size=%{size_download} bytes\\\\n\")",
+      "Bash(curl -fsS http://localhost:3000/campaigns/new -o /dev/null -w \"HTTP %{http_code}\\\\n\")",
+      "Bash(curl -isS -X OPTIONS http://localhost:8000/campaigns -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type')",
+      "Bash(git check-ignore *)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)",
+      "Bash(grep -E \"^\\\\.env$\")",
+      "Bash(grep -E \"\\(node_modules|\\\\.next/|__pycache__|\\\\.pyc$|\\\\.pytest_cache\\)\")"
+    ]
+  }
+}
