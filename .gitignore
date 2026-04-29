@@ -26,3 +26,12 @@ next-env.d.ts
 .idea/
 .vscode/
 .DS_Store
+
+# --- Local data dumps / throwaway scripts ---
+# Per-campaign export CSVs and one-off generator scripts produced during
+# debugging contain scraped WhatsApp invite IDs — keep them off GitHub.
+ai_groups.csv
+business_groups.csv
+apps/backend/ai_groups.csv
+apps/backend/business_groups.csv
+apps/backend/gen_csvs.py

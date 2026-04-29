@@ -55,12 +55,22 @@ Return one entry per input lead, keyed by invite_id (copied verbatim from the in
 
 
 def _format_lead_block(leads: list[Lead]) -> str:
+    """Lead presented to the scorer with verified WhatsApp group name first
+    (highest signal — what the group actually calls itself), description
+    (rare), and the scraped source-text context as fallback."""
     parts: list[str] = []
     for ld in leads:
+        lines = [f"[{ld.invite_id}]"]
+        if ld.verified_group_name:
+            lines.append(f"  group_name: {ld.verified_group_name}")
+        if ld.verified_group_description:
+            lines.append(f"  group_description: {ld.verified_group_description}")
         ctx = (ld.source_text or "").strip().replace("\n", " ")
         if len(ctx) > MAX_CONTEXT_CHARS:
             ctx = ctx[:MAX_CONTEXT_CHARS] + "…"
-        parts.append(f"[{ld.invite_id}] {ctx}")
+        if ctx:
+            lines.append(f"  source_context: {ctx}")
+        parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
 

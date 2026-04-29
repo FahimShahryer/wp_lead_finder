@@ -110,6 +110,24 @@ class Lead(Base):
     engagement: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # Persisted facts pulled live from WhatsApp's invite landing page during the
+    # WA-enrichment stage. NULL until enrichment runs. After enrichment:
+    #   verified_group_name IS NOT NULL  → invite is live and joinable
+    #   verified_group_name IS NULL AND last_validated_at IS NOT NULL → dead/expired invite
+    verified_group_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    verified_group_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
+    # Lifecycle role for the group, used by Module 3 (approval) and Module 4 (organizer).
+    # 'pending' = scored but not yet vetted; 'approved' = ready for join/messaging;
+    # 'rejected' = excluded; 'joined' = one of our numbers is in the group;
+    # 'contacted' = a message has been sent in/about it; 'archived' = parked.
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending", index=True
+    )
+
     campaign_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -137,5 +155,39 @@ class UrlCache(Base):
     url: Mapped[str] = mapped_column(Text, primary_key=True)
     markdown: Mapped[str] = mapped_column(Text, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Short categorical label e.g. "ai", "business", "networking". Stored
+    # lowercased so auto-tag dedupes across casing variants.
+    name: Mapped[str] = mapped_column(String(40), nullable=False)
+    color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "name", name="uq_tags_campaign_name"),
+    )
+
+
+class LeadTag(Base):
+    __tablename__ = "lead_tags"
+
+    lead_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("leads.id", ondelete="CASCADE"), primary_key=True
+    )
+    tag_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )

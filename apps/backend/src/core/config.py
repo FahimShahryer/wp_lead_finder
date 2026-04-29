@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     # Override in .env with your actual reddit username.
     reddit_user_agent: str = "script:wp2-leadfinder:0.1 (by /u/anonymous)"
 
+    # Optional residential proxy for outbound WhatsApp invite-page fetches.
+    # Format: http://USER:PASS@host:port. Leave empty to use the api container's
+    # direct egress IP. Useful for ban-isolation when running enrichment at scale.
+    whatsapp_proxy: str = ""
+
     @property
     def asyncpg_dsn(self) -> str:
         # asyncpg.connect/create_pool wants the bare 'postgresql://' DSN,

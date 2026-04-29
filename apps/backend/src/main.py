@@ -1,23 +1,34 @@
+import csv
+import io
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 import redis.asyncio as redis
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.db.models import Campaign, Lead
+from src.db.models import Campaign, Lead, LeadTag, Tag
 from src.db.models import Query as QueryModel
 from src.db.models import SearchResult
 from src.db.session import SessionLocal, engine, get_session
+from src.pipeline.auto_tag import auto_tag_campaign
+from src.pipeline.filter_by_prompt import filter_leads
+from src.pipeline.wa_enricher import (
+    EnrichmentCounts,
+    WhatsAppBlocked,
+    WhatsAppBudgetExceeded,
+    enrich_campaign,
+)
+from src.pipeline.whatsapp_validator import DEFAULT_REQUEST_BUDGET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("api")
@@ -133,6 +144,19 @@ class CampaignStatusResponse(BaseModel):
     completed_at: datetime | None
 
 
+LeadStatus = Literal["pending", "approved", "rejected", "joined", "contacted", "archived"]
+LEAD_STATUSES: tuple[LeadStatus, ...] = (
+    "pending", "approved", "rejected", "joined", "contacted", "archived",
+)
+
+
+class TagResponse(BaseModel):
+    id: int
+    name: str
+    color: str | None = None
+    leads_count: int | None = None
+
+
 class LeadResponse(BaseModel):
     id: int
     invite_id: str
@@ -141,11 +165,57 @@ class LeadResponse(BaseModel):
     geo_fit: int | None
     engagement: int | None
     total_score: int | None
+    status: LeadStatus
+    tags: list[str] = []
+    verified_group_name: str | None
+    verified_group_description: str | None
+    last_validated_at: datetime | None
     first_seen: datetime
     last_seen: datetime
 
     class Config:
         from_attributes = True
+
+
+class UpdateLeadStatusRequest(BaseModel):
+    status: LeadStatus
+
+
+class StatusCounts(BaseModel):
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    joined: int = 0
+    contacted: int = 0
+    archived: int = 0
+
+
+class FilterRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=500)
+    only_scored: bool = True
+    # Scope the categorization to leads in a single lifecycle stage. Default is
+    # 'pending' — that's the most common use (triage fresh leads). None = all.
+    status: LeadStatus | None = "pending"
+
+
+class FilteredLead(BaseModel):
+    id: int
+    invite_id: str
+    source_url: str | None
+    relevance: int | None
+    geo_fit: int | None
+    engagement: int | None
+    total_score: int | None
+    reason: str
+    group_name: str | None  # verified live from WhatsApp during validity check
+
+
+class FilterResponse(BaseModel):
+    prompt: str
+    total_considered: int
+    matched_count: int
+    dropped_invalid: int  # LLM-matched but invite link is dead/revoked
+    leads: list[FilteredLead]
 
 
 # ---------- Endpoints ----------
@@ -312,6 +382,32 @@ async def campaign_activity(
     ]
 
 
+async def _hydrate_leads_with_tags(
+    session: AsyncSession, leads: list[Lead]
+) -> list[LeadResponse]:
+    """Fan out to lead_tags+tags once and stitch tag names back onto each lead."""
+    if not leads:
+        return []
+    lead_ids = [ld.id for ld in leads]
+    rows = (
+        await session.execute(
+            select(LeadTag.lead_id, Tag.name)
+            .join(Tag, Tag.id == LeadTag.tag_id)
+            .where(LeadTag.lead_id.in_(lead_ids))
+            .order_by(Tag.name)
+        )
+    ).all()
+    by_lead: dict[int, list[str]] = {}
+    for lead_id, name in rows:
+        by_lead.setdefault(lead_id, []).append(name)
+    out: list[LeadResponse] = []
+    for ld in leads:
+        resp = LeadResponse.model_validate(ld)
+        resp.tags = by_lead.get(ld.id, [])
+        out.append(resp)
+    return out
+
+
 @app.get("/campaigns/{campaign_id}/leads", response_model=list[LeadResponse])
 async def list_leads(
     campaign_id: int,
@@ -319,6 +415,8 @@ async def list_leads(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     only_scored: bool = False,
+    status: LeadStatus | None = None,
+    tag_id: Annotated[list[int] | None, Query()] = None,
 ):
     c = await session.get(Campaign, campaign_id)
     if c is None:
@@ -327,7 +425,334 @@ async def list_leads(
     stmt = select(Lead).where(Lead.campaign_id == campaign_id)
     if only_scored:
         stmt = stmt.where(Lead.last_scored_at.isnot(None))
+    if status is not None:
+        stmt = stmt.where(Lead.status == status)
+    if tag_id:
+        # OR semantics: leads carrying any of the given tags.
+        stmt = stmt.where(
+            Lead.id.in_(
+                select(LeadTag.lead_id).where(LeadTag.tag_id.in_(tag_id))
+            )
+        )
     stmt = stmt.order_by(desc(Lead.total_score), desc(Lead.first_seen)).limit(limit).offset(offset)
 
-    rows = list((await session.execute(stmt)).scalars())
-    return [LeadResponse.model_validate(r) for r in rows]
+    leads = list((await session.execute(stmt)).scalars())
+    return await _hydrate_leads_with_tags(session, leads)
+
+
+@app.get("/campaigns/{campaign_id}/tags", response_model=list[TagResponse])
+async def list_tags(
+    campaign_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """All tags for a campaign with per-tag usage counts (drives the filter chips)."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    rows = (
+        await session.execute(
+            select(Tag.id, Tag.name, Tag.color, func.count(LeadTag.lead_id))
+            .outerjoin(LeadTag, LeadTag.tag_id == Tag.id)
+            .where(Tag.campaign_id == campaign_id)
+            .group_by(Tag.id)
+            .order_by(Tag.name)
+        )
+    ).all()
+    return [
+        TagResponse(id=r[0], name=r[1], color=r[2], leads_count=r[3])
+        for r in rows
+    ]
+
+
+class AutoTagResponse(BaseModel):
+    considered: int
+    tagged: int
+    tags_created: int
+    links_created: int
+    business_attached: int = 0
+    business_detached: int = 0
+    misc_attached: int = 0
+    misc_detached: int = 0
+
+
+class ExportFilter(BaseModel):
+    statuses: list[LeadStatus] | None = None  # None = any status
+    tag_ids: list[int] | None = None  # OR semantics across tags
+    min_total_score: int | None = None
+    max_total_score: int | None = None
+    only_scored: bool = False
+    only_valid_invites: bool = False  # cross-check against the validity cache
+
+
+@app.post("/campaigns/{campaign_id}/export.csv")
+async def export_leads_csv(
+    campaign_id: int,
+    filt: ExportFilter,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Streamed CSV of leads matching the supplied filters. Filter dimensions:
+    statuses, tag_ids (OR), score range, only_scored, only_valid_invites.
+    The verified group_name (when known) and tag list are included as columns."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    stmt = select(Lead).where(Lead.campaign_id == campaign_id)
+    if filt.statuses:
+        stmt = stmt.where(Lead.status.in_(filt.statuses))
+    if filt.only_scored:
+        stmt = stmt.where(Lead.last_scored_at.isnot(None))
+    if filt.min_total_score is not None:
+        stmt = stmt.where(Lead.total_score >= filt.min_total_score)
+    if filt.max_total_score is not None:
+        stmt = stmt.where(Lead.total_score <= filt.max_total_score)
+    if filt.tag_ids:
+        stmt = stmt.where(
+            Lead.id.in_(select(LeadTag.lead_id).where(LeadTag.tag_id.in_(filt.tag_ids)))
+        )
+    stmt = stmt.order_by(desc(Lead.total_score), desc(Lead.first_seen))
+    leads = list((await session.execute(stmt)).scalars())
+
+    tag_rows = (
+        await session.execute(
+            select(LeadTag.lead_id, Tag.name)
+            .join(Tag, Tag.id == LeadTag.tag_id)
+            .where(LeadTag.lead_id.in_([ld.id for ld in leads] or [0]))
+            .order_by(Tag.name)
+        )
+    ).all()
+    tags_by_lead: dict[int, list[str]] = {}
+    for lead_id, name in tag_rows:
+        tags_by_lead.setdefault(lead_id, []).append(name)
+
+    # Validity now lives on the Lead row (set by the enrichment endpoint).
+    # We never hit WhatsApp from inside the export path — that's a cheap
+    # filter on already-persisted data.
+    if filt.only_valid_invites:
+        leads = [ld for ld in leads if ld.verified_group_name is not None]
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "rank", "group_name", "group_description", "status", "tags", "total_score",
+        "relevance", "geo_fit", "engagement",
+        "whatsapp_link", "source_url", "invite_valid",
+    ])
+    for i, ld in enumerate(leads, 1):
+        if ld.last_validated_at is None:
+            invite_status = "unknown"
+        elif ld.verified_group_name is None:
+            invite_status = "no"
+        else:
+            invite_status = "yes"
+        w.writerow([
+            i,
+            ld.verified_group_name or "",
+            (ld.verified_group_description or "").replace("\n", " ").replace("\r", " "),
+            ld.status,
+            ",".join(tags_by_lead.get(ld.id, [])),
+            ld.total_score if ld.total_score is not None else "",
+            ld.relevance if ld.relevance is not None else "",
+            ld.geo_fit if ld.geo_fit is not None else "",
+            ld.engagement if ld.engagement is not None else "",
+            f"https://chat.whatsapp.com/{ld.invite_id}",
+            ld.source_url or "",
+            invite_status,
+        ])
+    buf.seek(0)
+
+    fname_safe = "".join(ch for ch in c.name if ch.isalnum() or ch in "-_") or "campaign"
+    filename = f"{fname_safe}_leads.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers=headers)
+
+
+class EnrichmentResponse(BaseModel):
+    considered: int
+    fetched: int
+    valid: int
+    invalid: int
+    transient_errors: int
+
+
+@app.post("/campaigns/{campaign_id}/enrich-whatsapp", response_model=EnrichmentResponse)
+async def run_wa_enrichment(
+    campaign_id: int,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    only_unvalidated: bool = True,
+    request_budget: int = DEFAULT_REQUEST_BUDGET,
+):
+    """Hit WhatsApp's invite landing page for every lead in this campaign and
+    persist the verified group name + description. Skips leads already
+    validated unless only_unvalidated=false. Returns 503 with a clear error
+    if Meta serves a CAPTCHA / challenge mid-batch (so we don't silently
+    falsify good groups), or 400 if the run exceeds request_budget."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+    try:
+        counts: EnrichmentCounts = await enrich_campaign(
+            campaign_id,
+            request.app.state.redis,
+            only_unvalidated=only_unvalidated,
+            request_budget=request_budget,
+        )
+    except WhatsAppBudgetExceeded as e:
+        raise HTTPException(400, str(e))
+    except WhatsAppBlocked as e:
+        # 503 because the underlying upstream is rejecting us; retrying after
+        # a cooldown (or via a different egress IP) is the resolution.
+        raise HTTPException(503, f"WhatsApp returned a block/challenge — aborted: {e}")
+    return EnrichmentResponse(
+        considered=counts.considered,
+        fetched=counts.fetched,
+        valid=counts.valid,
+        invalid=counts.invalid,
+        transient_errors=counts.transient_errors,
+    )
+
+
+@app.post("/campaigns/{campaign_id}/auto-tag", response_model=AutoTagResponse)
+async def run_auto_tag(
+    campaign_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    only_untagged: bool = True,
+):
+    """LLM pass that assigns 1-3 short categorical tags per scored lead. By default
+    runs only on leads that have no tags yet; pass only_untagged=false to retag all."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+    counts = await auto_tag_campaign(campaign_id, only_untagged=only_untagged)
+    return AutoTagResponse(**counts)
+
+
+@app.get("/campaigns/{campaign_id}/leads/status-counts", response_model=StatusCounts)
+async def status_counts(
+    campaign_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Per-status lead counts; drives the filter tabs."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    rows = (
+        await session.execute(
+            select(Lead.status, func.count(Lead.id))
+            .where(Lead.campaign_id == campaign_id)
+            .group_by(Lead.status)
+        )
+    ).all()
+    counts = StatusCounts()
+    for status_val, n in rows:
+        if hasattr(counts, status_val):
+            setattr(counts, status_val, n)
+    return counts
+
+
+class DeleteDeadResponse(BaseModel):
+    deleted: int
+
+
+@app.delete("/campaigns/{campaign_id}/leads/dead", response_model=DeleteDeadResponse)
+async def delete_dead_leads(
+    campaign_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Bulk-delete leads whose invite has been validated AND came back dead.
+    lead_tags rows cascade away via FK ON DELETE CASCADE."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+    result = await session.execute(
+        delete(Lead).where(
+            Lead.campaign_id == campaign_id,
+            Lead.last_validated_at.isnot(None),
+            Lead.verified_group_name.is_(None),
+        )
+    )
+    await session.commit()
+    return DeleteDeadResponse(deleted=result.rowcount or 0)
+
+
+@app.patch("/campaigns/{campaign_id}/leads/{lead_id}/status", response_model=LeadResponse)
+async def update_lead_status(
+    campaign_id: int,
+    lead_id: int,
+    req: UpdateLeadStatusRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Move a lead through its lifecycle (Module 3 approval + Module 4 organizer)."""
+    ld = await session.get(Lead, lead_id)
+    if ld is None or ld.campaign_id != campaign_id:
+        raise HTTPException(404, f"lead {lead_id} not found in campaign {campaign_id}")
+    ld.status = req.status
+    await session.commit()
+    await session.refresh(ld)
+    return LeadResponse.model_validate(ld)
+
+
+@app.post("/campaigns/{campaign_id}/filter", response_model=FilterResponse)
+async def filter_leads_by_prompt(
+    campaign_id: int,
+    req: FilterRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """LLM-classify this campaign's leads against a free-form category prompt
+    (e.g. "AI groups", "Dubai-based business groups"), then verify each match
+    against live WhatsApp to drop dead/revoked invite links. Sync — typical
+    end-to-end ~5-15s for 50 leads on a cold cache, sub-second once cached."""
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    stmt = select(Lead).where(Lead.campaign_id == campaign_id)
+    if req.only_scored:
+        stmt = stmt.where(Lead.last_scored_at.isnot(None))
+    if req.status is not None:
+        stmt = stmt.where(Lead.status == req.status)
+    stmt = stmt.order_by(desc(Lead.total_score), desc(Lead.first_seen))
+    leads = list((await session.execute(stmt)).scalars())
+
+    decisions = await filter_leads(req.prompt, leads)
+
+    candidates: list[tuple[Lead, str]] = []
+    for ld in leads:
+        d = decisions.get(ld.invite_id)
+        if d is None or not d.matches:
+            continue
+        candidates.append((ld, d.reason))
+
+    matched: list[FilteredLead] = []
+    dropped = 0
+    for ld, reason in candidates:
+        # Drop only leads we *know* are dead (validation has run AND came
+        # back invalid). Leads that haven't been enriched yet are kept so
+        # we don't silently hide them — run "Enrich WhatsApp" for clean drop.
+        if ld.last_validated_at is not None and ld.verified_group_name is None:
+            dropped += 1
+            continue
+        matched.append(
+            FilteredLead(
+                id=ld.id,
+                invite_id=ld.invite_id,
+                source_url=ld.source_url,
+                relevance=ld.relevance,
+                geo_fit=ld.geo_fit,
+                engagement=ld.engagement,
+                total_score=ld.total_score,
+                reason=reason,
+                group_name=ld.verified_group_name,
+            )
+        )
+
+    return FilterResponse(
+        prompt=req.prompt,
+        total_considered=len(leads),
+        matched_count=len(matched),
+        dropped_invalid=dropped,
+        leads=matched,
+    )
