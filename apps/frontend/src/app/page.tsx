@@ -15,6 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { NumbersCard } from "@/components/numbers-card";
 
 export default function DashboardPage() {
   const { data, isLoading, error, mutate } = useSWR<CampaignSummary[]>("/campaigns", fetcher, {
@@ -22,7 +23,9 @@ export default function DashboardPage() {
   });
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <NumbersCard />
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Campaigns</h1>

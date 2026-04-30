@@ -20,6 +20,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/" className="text-muted-foreground hover:text-foreground">
                 Campaigns
               </Link>
+              <Link href="/inbox" className="text-muted-foreground hover:text-foreground">
+                Inbox
+              </Link>
+              <Link href="/broadcasts" className="text-muted-foreground hover:text-foreground">
+                Broadcasts
+              </Link>
               <Link
                 href="/campaigns/new"
                 className="text-foreground font-medium hover:underline"

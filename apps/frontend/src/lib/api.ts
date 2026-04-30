@@ -108,6 +108,104 @@ export type EnrichmentResult = {
   transient_errors: number;
 };
 
+export type WaNumberStatus =
+  | "pending"
+  | "qr_pending"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "logged_out";
+
+export type WhatsAppNumber = {
+  id: number;
+  display_name: string;
+  msisdn: string | null;
+  session_id: string;
+  status: WaNumberStatus;
+  qr_data_url: string | null;
+  last_seen_at: string | null;
+  created_at: string;
+};
+
+export type WhatsAppGroup = {
+  jid: string;
+  subject: string;
+  participants_count: number;
+  announce: boolean;
+};
+
+export type BroadcastStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type BroadcastJob = {
+  id: number;
+  number_id: number;
+  body: string;
+  status: BroadcastStatus;
+  total_targets: number;
+  sent_count: number;
+  failed_count: number;
+  min_delay_seconds: number;
+  max_delay_seconds: number;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+};
+
+export type OutboundMessage = {
+  id: number;
+  jid: string;
+  group_subject: string | null;
+  status: "queued" | "sent" | "failed";
+  error: string | null;
+  attempted_at: string;
+};
+
+export type BroadcastDetail = BroadcastJob & {
+  messages: OutboundMessage[];
+};
+
+export type BroadcastSummary = BroadcastJob & {
+  number_display_name: string;
+  number_msisdn: string | null;
+};
+
+export type BroadcastRequest = {
+  body: string;
+  targets: string[];
+  min_delay_seconds: number;
+  max_delay_seconds: number;
+};
+
+export type ChatKind = "dm" | "group";
+
+export type Conversation = {
+  id: number;
+  number_id: number;
+  number_display_name: string;
+  jid: string;
+  kind: ChatKind;
+  name: string | null;
+  last_message_at: string | null;
+  last_message_preview: string | null;
+  unread_count: number;
+};
+
+export type ConversationMessage = {
+  id: number;
+  direction: "in" | "out";
+  sender_jid: string | null;
+  sender_name: string | null;
+  body: string;
+  ts: string;
+  status: string;
+};
+
 export type FilteredLead = {
   id: number;
   invite_id: string;
@@ -215,6 +313,49 @@ export const api = {
     request<{ deleted: number }>(`/campaigns/${campaignId}/leads/dead`, {
       method: "DELETE",
     }),
+  listNumbers: () => request<WhatsAppNumber[]>(`/numbers`),
+  getNumber: (id: number) => request<WhatsAppNumber>(`/numbers/${id}`),
+  createNumber: (display_name: string) =>
+    request<WhatsAppNumber>(`/numbers`, {
+      method: "POST",
+      body: JSON.stringify({ display_name }),
+    }),
+  deleteNumber: (id: number) =>
+    request<{ ok: boolean }>(`/numbers/${id}`, { method: "DELETE" }),
+  listNumberGroups: (numberId: number) =>
+    request<WhatsAppGroup[]>(`/numbers/${numberId}/groups`),
+  createBroadcast: (numberId: number, req: BroadcastRequest) =>
+    request<BroadcastJob>(`/numbers/${numberId}/broadcast`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  listBroadcasts: (numberId: number) =>
+    request<BroadcastJob[]>(`/numbers/${numberId}/broadcasts`),
+  listAllBroadcasts: (opts: { limit?: number; status?: BroadcastStatus } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.limit) params.set("limit", String(opts.limit));
+    if (opts.status) params.set("status", opts.status);
+    const qs = params.toString();
+    return request<BroadcastSummary[]>(`/broadcasts${qs ? `?${qs}` : ""}`);
+  },
+  getBroadcast: (jobId: number) =>
+    request<BroadcastDetail>(`/broadcasts/${jobId}`),
+  listConversations: (opts: { number_id?: number; kind?: ChatKind } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.number_id !== undefined) params.set("number_id", String(opts.number_id));
+    if (opts.kind) params.set("kind", opts.kind);
+    const qs = params.toString();
+    return request<Conversation[]>(`/conversations${qs ? `?${qs}` : ""}`);
+  },
+  listConversationMessages: (convId: number) =>
+    request<ConversationMessage[]>(`/conversations/${convId}/messages`),
+  sendReply: (convId: number, body: string) =>
+    request<ConversationMessage>(`/conversations/${convId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }),
+  markConversationRead: (convId: number) =>
+    request<void>(`/conversations/${convId}/read`, { method: "POST" }),
   createCampaign: (req: CreateCampaignRequest) =>
     request<CreateCampaignResponse>("/campaigns", {
       method: "POST",

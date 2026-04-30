@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     # direct egress IP. Useful for ban-isolation when running enrichment at scale.
     whatsapp_proxy: str = ""
 
+    # Internal URL of the wa-sidecar Node service that owns Baileys WS sessions.
+    # Compose injects this; default targets the in-network service name.
+    wa_sidecar_url: str = "http://wa-sidecar:3001"
+
+    # Shared secret used by the sidecar to authenticate inbound message webhooks
+    # (POST /internal/inbound). Both api and sidecar containers must read the
+    # same value via env. Override in .env for production; the dev default is
+    # safe because port 8000 is only exposed for browser traffic on localhost.
+    wa_sidecar_secret: str = "dev-internal-secret-change-me"
+
     @property
     def asyncpg_dsn(self) -> str:
         # asyncpg.connect/create_pool wants the bare 'postgresql://' DSN,

@@ -3,6 +3,7 @@ import logging
 from arq.connections import RedisSettings
 
 from src.core.config import settings
+from src.pipeline.broadcaster import run_broadcast as _run_broadcast
 from src.pipeline.run_campaign import run_campaign as _run_campaign
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -26,8 +27,16 @@ async def run_campaign(ctx, campaign_id: int):
     logger.info("campaign %s done", campaign_id)
 
 
+async def run_broadcast(ctx, job_id: int):
+    """Throttled bulk-send through one connected WhatsApp number. Idempotent on
+    retry — only OutboundMessage rows in 'queued' state are processed."""
+    logger.info("running broadcast %s", job_id)
+    await _run_broadcast(job_id)
+    logger.info("broadcast %s done", job_id)
+
+
 class WorkerSettings:
-    functions = [run_campaign]
+    functions = [run_campaign, run_broadcast]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

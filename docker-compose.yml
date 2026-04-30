@@ -25,6 +25,27 @@ services:
       timeout: 3s
       retries: 10
 
+  wa-sidecar:
+    build:
+      context: ./apps/wa-sidecar
+    # Session creds persist across restarts via this named volume; no host
+    # bind so the encrypted Baileys auth files don't leak into git.
+    volumes:
+      - wa_sessions:/data/sessions
+    environment:
+      PORT: "3001"
+      SESSIONS_DIR: /data/sessions
+      LOG_LEVEL: info
+      # Webhook target + shared secret for pushing inbound messages back to api.
+      API_URL: http://api:8000
+      INTERNAL_TOKEN: dev-internal-secret-change-me
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
   api:
     build:
       context: ./apps/backend
@@ -35,6 +56,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      wa-sidecar:
+        condition: service_started
+    environment:
+      WA_SIDECAR_URL: http://wa-sidecar:3001
+      WA_SIDECAR_SECRET: dev-internal-secret-change-me
     ports:
       - "8000:8000"
     volumes:
@@ -93,3 +119,4 @@ services:
 
 volumes:
   postgres_data:
+  wa_sessions:

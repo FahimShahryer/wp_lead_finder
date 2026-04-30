@@ -2,21 +2,32 @@ import csv
 import io
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Literal
 
 import redis.asyncio as redis
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.clients import wa_sidecar_client
 from src.core.config import settings
-from src.db.models import Campaign, Lead, LeadTag, Tag
+from src.db.models import (
+    BroadcastJob,
+    Campaign,
+    Conversation,
+    Lead,
+    LeadTag,
+    Message,
+    OutboundMessage,
+    Tag,
+    WhatsAppNumber,
+)
 from src.db.models import Query as QueryModel
 from src.db.models import SearchResult
 from src.db.session import SessionLocal, engine, get_session
@@ -755,4 +766,782 @@ async def filter_leads_by_prompt(
         matched_count=len(matched),
         dropped_invalid=dropped,
         leads=matched,
+    )
+
+
+# ---------- Module 7: WhatsApp numbers ----------
+
+
+WaStatus = Literal[
+    "pending",
+    "qr_pending",
+    "connecting",
+    "connected",
+    "disconnected",
+    "logged_out",
+]
+
+
+class CreateNumberRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+
+class WhatsAppNumberResponse(BaseModel):
+    id: int
+    display_name: str
+    msisdn: str | None
+    session_id: str
+    status: WaStatus
+    qr_data_url: str | None  # populated only while status == 'qr_pending'
+    last_seen_at: datetime | None
+    created_at: datetime
+
+
+def _wa_response(
+    row: WhatsAppNumber, qr_data_url: str | None = None
+) -> WhatsAppNumberResponse:
+    return WhatsAppNumberResponse(
+        id=row.id,
+        display_name=row.display_name,
+        msisdn=row.msisdn,
+        session_id=row.session_id,
+        status=row.status,  # type: ignore[arg-type]
+        qr_data_url=qr_data_url,
+        last_seen_at=row.last_seen_at,
+        created_at=row.created_at,
+    )
+
+
+async def _refresh_from_sidecar(
+    session: AsyncSession, row: WhatsAppNumber
+) -> tuple[WhatsAppNumber, str | None]:
+    """Fetch current state from the sidecar and persist any drift back to the
+    DB. Returns the (possibly mutated) row plus the live QR data URL (None
+    unless the session is currently waiting for a scan)."""
+    try:
+        sc = await wa_sidecar_client.get_session(row.session_id)
+    except wa_sidecar_client.WaSidecarError as e:
+        logger.warning("sidecar refresh failed for session %s: %s", row.session_id, e)
+        return row, None
+
+    if sc is None:
+        # Sidecar lost the session in memory (e.g. crash, container rebuild).
+        # We mark the row disconnected so the user can re-initiate. The DB
+        # row is the source of truth for "this number was once added".
+        if row.status != "disconnected":
+            row.status = "disconnected"
+            await session.commit()
+            await session.refresh(row)
+        return row, None
+
+    changed = (sc.status and sc.status != row.status) or (
+        sc.msisdn and sc.msisdn != row.msisdn
+    )
+    if not changed:
+        return row, sc.qr_data_url
+
+    # Server-side now() for last_seen_at avoids clock skew between containers.
+    if sc.status == "connected":
+        await session.execute(
+            text(
+                "UPDATE whatsapp_numbers "
+                "SET status=:s, msisdn=:m, last_seen_at=now() WHERE id=:id"
+            ),
+            {"s": sc.status, "m": sc.msisdn, "id": row.id},
+        )
+    else:
+        await session.execute(
+            text(
+                "UPDATE whatsapp_numbers SET status=:s, msisdn=:m WHERE id=:id"
+            ),
+            {"s": sc.status, "m": sc.msisdn, "id": row.id},
+        )
+    await session.commit()
+    await session.refresh(row)
+    return row, sc.qr_data_url
+
+
+@app.post("/numbers", status_code=201, response_model=WhatsAppNumberResponse)
+async def create_number(
+    req: CreateNumberRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Initialize a new WhatsApp connection. Persists a numbers row, asks the
+    sidecar to start a Baileys session, and returns the initial QR data URL
+    (poll GET /numbers/{id} for updates as the user scans)."""
+    import uuid
+
+    session_id = uuid.uuid4().hex
+    row = WhatsAppNumber(
+        display_name=req.display_name.strip(),
+        session_id=session_id,
+        status="pending",
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+
+    try:
+        sc = await wa_sidecar_client.create_session(session_id, row.display_name)
+    except wa_sidecar_client.WaSidecarError as e:
+        # Roll back the row we just inserted — without a sidecar session it
+        # has no purpose and would be a phantom in the UI.
+        await session.delete(row)
+        await session.commit()
+        raise HTTPException(503, f"wa-sidecar error: {e}") from e
+
+    if sc.status and sc.status != row.status:
+        row.status = sc.status
+        await session.commit()
+        await session.refresh(row)
+
+    return _wa_response(row, qr_data_url=sc.qr_data_url)
+
+
+@app.get("/numbers", response_model=list[WhatsAppNumberResponse])
+async def list_numbers(
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """List all linked numbers with their *current* status. Reconciles each
+    row against the sidecar in case the WS state drifted (reconnect, logout)."""
+    rows = list(
+        (
+            await session.execute(
+                select(WhatsAppNumber).order_by(desc(WhatsAppNumber.created_at))
+            )
+        ).scalars()
+    )
+    out: list[WhatsAppNumberResponse] = []
+    for row in rows:
+        refreshed, qr = await _refresh_from_sidecar(session, row)
+        out.append(_wa_response(refreshed, qr_data_url=qr))
+    return out
+
+
+@app.get("/numbers/{number_id}", response_model=WhatsAppNumberResponse)
+async def get_number(
+    number_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Single-number detail — used by the AddNumberModal poll loop while the
+    user is scanning the QR. Returns fresh state from the sidecar."""
+    row = await session.get(WhatsAppNumber, number_id)
+    if row is None:
+        raise HTTPException(404, f"number {number_id} not found")
+    refreshed, qr = await _refresh_from_sidecar(session, row)
+    return _wa_response(refreshed, qr_data_url=qr)
+
+
+@app.delete("/numbers/{number_id}", status_code=200)
+async def delete_number(
+    number_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Logout + remove a linked number. Best-effort: we always delete the
+    DB row even if the sidecar logout fails (so the UI can recover from
+    drifted state)."""
+    row = await session.get(WhatsAppNumber, number_id)
+    if row is None:
+        raise HTTPException(404, f"number {number_id} not found")
+    try:
+        await wa_sidecar_client.logout_session(row.session_id)
+    except wa_sidecar_client.WaSidecarError as e:
+        logger.warning("sidecar logout failed for %s: %s", row.session_id, e)
+    await session.delete(row)
+    await session.commit()
+    return {"ok": True}
+
+
+# ---------- Module 5: groups + broadcast ----------
+
+
+class GroupResponse(BaseModel):
+    jid: str
+    subject: str
+    participants_count: int
+    announce: bool  # admins-only — sending will fail unless we're admin
+
+
+@app.get("/numbers/{number_id}/groups", response_model=list[GroupResponse])
+async def list_groups_for_number(
+    number_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """All WhatsApp groups this number is a member of, fetched fresh from the
+    sidecar (which queries Baileys' in-memory store). Returns 409 if the
+    primary phone has dropped offline — the caller should reconnect first."""
+    row = await session.get(WhatsAppNumber, number_id)
+    if row is None:
+        raise HTTPException(404, f"number {number_id} not found")
+    try:
+        groups = await wa_sidecar_client.list_groups(row.session_id)
+    except wa_sidecar_client.NotConnected as e:
+        raise HTTPException(409, str(e)) from e
+    except wa_sidecar_client.WaSidecarError as e:
+        raise HTTPException(503, f"wa-sidecar error: {e}") from e
+    return [
+        GroupResponse(
+            jid=g.jid,
+            subject=g.subject,
+            participants_count=g.participants_count,
+            announce=g.announce,
+        )
+        for g in groups
+    ]
+
+
+class BroadcastRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=4096)
+    targets: list[str] = Field(min_length=1, max_length=200)
+    min_delay_seconds: int = Field(default=3, ge=0, le=600)
+    max_delay_seconds: int = Field(default=15, ge=0, le=600)
+
+
+class BroadcastJobResponse(BaseModel):
+    id: int
+    number_id: int
+    body: str
+    status: str
+    total_targets: int
+    sent_count: int
+    failed_count: int
+    min_delay_seconds: int
+    max_delay_seconds: int
+    error: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class OutboundMessageResponse(BaseModel):
+    id: int
+    jid: str
+    group_subject: str | None
+    status: str
+    error: str | None
+    attempted_at: datetime
+
+
+class BroadcastDetailResponse(BroadcastJobResponse):
+    messages: list[OutboundMessageResponse]
+
+
+def _broadcast_job_view(job: BroadcastJob) -> BroadcastJobResponse:
+    return BroadcastJobResponse(
+        id=job.id,
+        number_id=job.number_id,
+        body=job.body,
+        status=job.status,
+        total_targets=job.total_targets,
+        sent_count=job.sent_count,
+        failed_count=job.failed_count,
+        min_delay_seconds=job.min_delay_seconds,
+        max_delay_seconds=job.max_delay_seconds,
+        error=job.error,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+    )
+
+
+@app.post(
+    "/numbers/{number_id}/broadcast",
+    status_code=201,
+    response_model=BroadcastJobResponse,
+)
+async def create_broadcast(
+    number_id: int,
+    req: BroadcastRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Enqueue a throttled bulk-send. Validates targets + creates per-message
+    rows up front so the worker has everything it needs to crash-resume."""
+    if req.max_delay_seconds < req.min_delay_seconds:
+        raise HTTPException(400, "max_delay_seconds must be >= min_delay_seconds")
+
+    number = await session.get(WhatsAppNumber, number_id)
+    if number is None:
+        raise HTTPException(404, f"number {number_id} not found")
+    if number.status != "connected":
+        raise HTTPException(
+            409, f"number is {number.status}; reconnect before broadcasting"
+        )
+
+    # Resolve subjects up front so the audit log carries them — the source of
+    # truth (sidecar's group cache) can drift later. JIDs that the number isn't
+    # actually a member of are dropped with a 400.
+    try:
+        groups = await wa_sidecar_client.list_groups(number.session_id)
+    except wa_sidecar_client.NotConnected as e:
+        raise HTTPException(409, str(e)) from e
+    except wa_sidecar_client.WaSidecarError as e:
+        raise HTTPException(503, f"wa-sidecar error: {e}") from e
+    subject_by_jid = {g.jid: g.subject for g in groups}
+    missing = [j for j in req.targets if j not in subject_by_jid]
+    if missing:
+        raise HTTPException(
+            400,
+            f"these JIDs aren't groups this number is in: {missing[:5]}",
+        )
+
+    job = BroadcastJob(
+        number_id=number.id,
+        body=req.body,
+        total_targets=len(req.targets),
+        min_delay_seconds=req.min_delay_seconds,
+        max_delay_seconds=req.max_delay_seconds,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+
+    for jid in req.targets:
+        session.add(
+            OutboundMessage(
+                job_id=job.id,
+                jid=jid,
+                group_subject=subject_by_jid.get(jid),
+                status="queued",
+            )
+        )
+    await session.commit()
+
+    await app.state.arq_pool.enqueue_job("run_broadcast", job.id)
+    logger.info("broadcast %s enqueued (number=%s targets=%d)", job.id, number.id, len(req.targets))
+    return _broadcast_job_view(job)
+
+
+@app.get(
+    "/numbers/{number_id}/broadcasts",
+    response_model=list[BroadcastJobResponse],
+)
+async def list_broadcasts(
+    number_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    rows = list(
+        (
+            await session.execute(
+                select(BroadcastJob)
+                .where(BroadcastJob.number_id == number_id)
+                .order_by(desc(BroadcastJob.created_at))
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    return [_broadcast_job_view(r) for r in rows]
+
+
+class BroadcastSummaryResponse(BroadcastJobResponse):
+    """List-row variant — same fields as BroadcastJobResponse plus the owning
+    number's display_name + msisdn so the UI can render context without a
+    second round-trip per row."""
+
+    number_display_name: str
+    number_msisdn: str | None
+
+
+@app.get("/broadcasts", response_model=list[BroadcastSummaryResponse])
+async def list_all_broadcasts(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    status: str | None = None,
+):
+    """All broadcast jobs across every number. Newest first. Filter by status
+    if provided. Drives the /broadcasts page."""
+    stmt = (
+        select(BroadcastJob, WhatsAppNumber.display_name, WhatsAppNumber.msisdn)
+        .join(WhatsAppNumber, WhatsAppNumber.id == BroadcastJob.number_id)
+    )
+    if status:
+        stmt = stmt.where(BroadcastJob.status == status)
+    stmt = stmt.order_by(desc(BroadcastJob.created_at)).limit(limit)
+    rows = list((await session.execute(stmt)).all())
+    return [
+        BroadcastSummaryResponse(
+            **_broadcast_job_view(job).model_dump(),
+            number_display_name=display_name,
+            number_msisdn=msisdn,
+        )
+        for job, display_name, msisdn in rows
+    ]
+
+
+@app.get("/broadcasts/{job_id}", response_model=BroadcastDetailResponse)
+async def get_broadcast(
+    job_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    job = await session.get(BroadcastJob, job_id)
+    if job is None:
+        raise HTTPException(404, f"broadcast {job_id} not found")
+    msgs = list(
+        (
+            await session.execute(
+                select(OutboundMessage)
+                .where(OutboundMessage.job_id == job_id)
+                .order_by(OutboundMessage.id)
+            )
+        ).scalars()
+    )
+    return BroadcastDetailResponse(
+        **_broadcast_job_view(job).model_dump(),
+        messages=[
+            OutboundMessageResponse(
+                id=m.id,
+                jid=m.jid,
+                group_subject=m.group_subject,
+                status=m.status,
+                error=m.error,
+                attempted_at=m.attempted_at,
+            )
+            for m in msgs
+        ],
+    )
+
+
+# ---------- Module 6: Shared inbox ----------
+
+
+async def _require_internal_token(
+    x_internal_token: Annotated[str | None, Header()] = None,
+):
+    """Gate for sidecar → api webhooks. We don't expose port 3001 outside the
+    Docker network, but port 8000 IS exposed for the browser, so this header
+    check is the actual security boundary."""
+    if not settings.wa_sidecar_secret:
+        raise HTTPException(503, "internal webhook disabled (no secret configured)")
+    if x_internal_token != settings.wa_sidecar_secret:
+        raise HTTPException(401, "invalid internal token")
+
+
+class InboundMessageRequest(BaseModel):
+    session_id: str
+    wa_message_id: str
+    chat_jid: str
+    # Group subject for kind='group'; contact push name for kind='dm'. None if
+    # the sidecar couldn't resolve it (we'll keep whatever conversation.name
+    # we already had, or fall back to the jid).
+    chat_name: str | None = None
+    kind: Literal["dm", "group"]
+    direction: Literal["in", "out"]
+    sender_jid: str | None
+    # WhatsApp pushName of THIS message's author. None for outbound from us.
+    sender_name: str | None = None
+    body: str = ""
+    ts_unix: int
+
+
+@app.post("/internal/inbound", status_code=204)
+async def inbound_message(
+    payload: InboundMessageRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _: Annotated[None, Depends(_require_internal_token)] = None,
+):
+    """Sidecar webhook for new messages. Idempotent — duplicate webhooks for
+    the same wa_message_id are dropped via the unique constraint on
+    (conversation_id, wa_message_id)."""
+    number = await session.scalar(
+        select(WhatsAppNumber).where(WhatsAppNumber.session_id == payload.session_id)
+    )
+    if number is None:
+        # Sidecar might race ahead of the api row creation in rare cases; just
+        # drop the message rather than error out.
+        logger.info("inbound for unknown session %s — dropped", payload.session_id)
+        return None
+
+    # Upsert conversation. We use number_id+jid as the natural key.
+    conv = await session.scalar(
+        select(Conversation).where(
+            Conversation.number_id == number.id,
+            Conversation.jid == payload.chat_jid,
+        )
+    )
+    ts = datetime.fromtimestamp(payload.ts_unix, tz=timezone.utc)
+    # For groups, prefix preview with sender name (WA-Web style: "Alice: hi"
+    # so the user sees who said what without opening the thread).
+    if payload.kind == "group" and payload.direction == "in" and payload.sender_name:
+        preview = f"{payload.sender_name}: {payload.body}"[:200]
+    else:
+        preview = payload.body[:200] if payload.body else ""
+    # Best chat-name guess: explicit chat_name from sidecar > previously stored
+    # conversation name > jid as last resort.
+    name_hint = payload.chat_name or payload.chat_jid
+
+    if conv is None:
+        conv = Conversation(
+            number_id=number.id,
+            jid=payload.chat_jid,
+            kind=payload.kind,
+            name=name_hint,
+            last_message_at=ts,
+            last_message_preview=preview,
+            unread_count=1 if payload.direction == "in" else 0,
+        )
+        session.add(conv)
+        await session.flush()
+    else:
+        conv.last_message_at = ts
+        conv.last_message_preview = preview
+        if payload.direction == "in":
+            conv.unread_count += 1
+        # Refresh chat name when sidecar gives us a real one (replaces a stale
+        # jid placeholder OR a stale push name with the now-known group subject).
+        if payload.chat_name and conv.name != payload.chat_name:
+            # For groups, sidecar's group subject is authoritative — always update.
+            # For DMs, only promote when we currently only have the jid.
+            if payload.kind == "group" or (
+                not conv.name or conv.name == conv.jid
+            ):
+                conv.name = payload.chat_name
+
+    msg = Message(
+        conversation_id=conv.id,
+        wa_message_id=payload.wa_message_id,
+        direction=payload.direction,
+        sender_jid=payload.sender_jid,
+        sender_name=payload.sender_name,
+        body=payload.body,
+        ts=ts,
+        status="received" if payload.direction == "in" else "sent",
+    )
+    try:
+        session.add(msg)
+        await session.commit()
+    except Exception:
+        # Almost certainly the unique-key collision (duplicate webhook). Roll
+        # back the message but keep the conversation update we already did.
+        await session.rollback()
+    return None
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    number_id: int
+    number_display_name: str
+    jid: str
+    kind: Literal["dm", "group"]
+    name: str | None
+    last_message_at: datetime | None
+    last_message_preview: str | None
+    unread_count: int
+
+
+class MessageResponse(BaseModel):
+    id: int
+    direction: Literal["in", "out"]
+    sender_jid: str | None
+    sender_name: str | None
+    body: str
+    ts: datetime
+    status: str
+
+
+@app.get("/conversations", response_model=list[ConversationResponse])
+async def list_conversations(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    number_id: int | None = None,
+    kind: Literal["dm", "group"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+):
+    """Unified inbox feed. Default: every conversation across every connected
+    number, newest message first. Filterable by number and chat kind."""
+    stmt = (
+        select(Conversation, WhatsAppNumber.display_name)
+        .join(WhatsAppNumber, WhatsAppNumber.id == Conversation.number_id)
+    )
+    if number_id is not None:
+        stmt = stmt.where(Conversation.number_id == number_id)
+    if kind is not None:
+        stmt = stmt.where(Conversation.kind == kind)
+    stmt = stmt.order_by(
+        desc(Conversation.last_message_at), desc(Conversation.id)
+    ).limit(limit)
+    rows = list((await session.execute(stmt)).all())
+    return [
+        ConversationResponse(
+            id=c.id,
+            number_id=c.number_id,
+            number_display_name=display_name,
+            jid=c.jid,
+            kind=c.kind,  # type: ignore[arg-type]
+            name=c.name,
+            last_message_at=c.last_message_at,
+            last_message_preview=c.last_message_preview,
+            unread_count=c.unread_count,
+        )
+        for c, display_name in rows
+    ]
+
+
+@app.get(
+    "/conversations/{conv_id}/messages", response_model=list[MessageResponse]
+)
+async def list_messages(
+    conv_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+):
+    conv = await session.get(Conversation, conv_id)
+    if conv is None:
+        raise HTTPException(404, f"conversation {conv_id} not found")
+    rows = list(
+        (
+            await session.execute(
+                select(Message)
+                .where(Message.conversation_id == conv_id)
+                .order_by(Message.ts, Message.id)
+                .limit(limit)
+            )
+        ).scalars()
+    )
+    return [
+        MessageResponse(
+            id=m.id,
+            direction=m.direction,  # type: ignore[arg-type]
+            sender_jid=m.sender_jid,
+            sender_name=m.sender_name,
+            body=m.body,
+            ts=m.ts,
+            status=m.status,
+        )
+        for m in rows
+    ]
+
+
+class RefreshNamesResponse(BaseModel):
+    refreshed: int
+    skipped: int
+
+
+@app.post(
+    "/conversations/refresh-group-names",
+    response_model=RefreshNamesResponse,
+)
+async def refresh_group_names(
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """For every connected number, ask the sidecar for its current group list
+    and overwrite stale conversation names with the real group subjects.
+
+    Useful for backfilling rows created before the sidecar started passing
+    chat_name explicitly — and as a self-heal whenever group subjects change."""
+    numbers = list(
+        (
+            await session.execute(
+                select(WhatsAppNumber).where(WhatsAppNumber.status == "connected")
+            )
+        ).scalars()
+    )
+    refreshed = 0
+    skipped = 0
+    for number in numbers:
+        try:
+            groups = await wa_sidecar_client.list_groups(number.session_id)
+        except wa_sidecar_client.WaSidecarError as e:
+            logger.warning("refresh-group-names: %s skipped (%s)", number.session_id, e)
+            skipped += 1
+            continue
+        subject_by_jid = {g.jid: g.subject for g in groups if g.subject}
+        if not subject_by_jid:
+            continue
+        rows = list(
+            (
+                await session.execute(
+                    select(Conversation).where(
+                        Conversation.number_id == number.id,
+                        Conversation.kind == "group",
+                        Conversation.jid.in_(list(subject_by_jid.keys())),
+                    )
+                )
+            ).scalars()
+        )
+        for c in rows:
+            new_name = subject_by_jid.get(c.jid)
+            if new_name and c.name != new_name:
+                c.name = new_name
+                refreshed += 1
+        await session.commit()
+    return RefreshNamesResponse(refreshed=refreshed, skipped=skipped)
+
+
+@app.post("/conversations/{conv_id}/read", status_code=204)
+async def mark_conversation_read(
+    conv_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Reset unread_count to 0. We don't tell WhatsApp the chat is read — that
+    would generate read-receipt traffic and risk being interpreted as bot
+    behavior. UI-side state only."""
+    conv = await session.get(Conversation, conv_id)
+    if conv is None:
+        raise HTTPException(404, f"conversation {conv_id} not found")
+    conv.unread_count = 0
+    await session.commit()
+    return None
+
+
+class SendReplyRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=4096)
+
+
+@app.post(
+    "/conversations/{conv_id}/messages",
+    status_code=201,
+    response_model=MessageResponse,
+)
+async def send_reply(
+    conv_id: int,
+    req: SendReplyRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Send a reply via the conversation's owning number. Persists optimistically
+    so the UI sees the row even if the sidecar's webhook is slow."""
+    conv = await session.get(Conversation, conv_id)
+    if conv is None:
+        raise HTTPException(404, f"conversation {conv_id} not found")
+    number = await session.get(WhatsAppNumber, conv.number_id)
+    if number is None:
+        raise HTTPException(404, "owning number missing")
+    if number.status != "connected":
+        raise HTTPException(
+            409, f"number is {number.status}; reconnect before sending"
+        )
+
+    try:
+        sent = await wa_sidecar_client.send_message(
+            number.session_id, conv.jid, req.body
+        )
+    except wa_sidecar_client.NotConnected as e:
+        raise HTTPException(409, str(e)) from e
+    except wa_sidecar_client.WaSidecarError as e:
+        raise HTTPException(503, f"wa-sidecar error: {e}") from e
+
+    now = datetime.now(timezone.utc)
+    # Insert the outbound row ourselves rather than waiting on the upsert
+    # webhook — the sidecar still emits one, but the unique-key conflict will
+    # silently drop the duplicate. This keeps the UI snappy.
+    msg = Message(
+        conversation_id=conv.id,
+        wa_message_id=sent.message_id or f"local-{now.timestamp()}",
+        direction="out",
+        sender_jid=None,
+        body=req.body,
+        ts=now,
+        status="sent",
+    )
+    session.add(msg)
+    conv.last_message_at = now
+    conv.last_message_preview = req.body[:200]
+    await session.commit()
+    await session.refresh(msg)
+    return MessageResponse(
+        id=msg.id,
+        direction="out",
+        sender_jid=None,
+        sender_name=None,
+        body=msg.body,
+        ts=msg.ts,
+        status=msg.status,
     )
