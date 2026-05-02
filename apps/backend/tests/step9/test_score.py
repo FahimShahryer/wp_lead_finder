@@ -166,6 +166,67 @@ async def test_scoring_is_idempotent_on_rerun():
     second = await score_for_campaign(cid)
 
     assert first["scored"] == len(SEED_LEADS)
-    assert second == {"scored": 0, "missing": 0, "skipped": 0}, (
-        "second run must score 0 (all leads already have last_scored_at)"
+    # Second run: nothing eligible → all counters zero.
+    assert second["scored"] == 0
+    assert second["clamped"] == 0
+    assert second["missing"] == 0
+
+
+async def test_scoring_picks_up_leads_re_validated_after_last_scoring():
+    """When WA enrichment runs after a lead was scored on noisy snippet text,
+    a re-score with the verified_group_name should be triggered. This is the
+    'enrichment data is ground truth' lever — verified group name is much
+    higher-signal than the 200-char snippet around the invite."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import update
+
+    cid = await _seed_campaign_with_leads()
+    first = await score_for_campaign(cid)
+    assert first["scored"] == len(SEED_LEADS)
+
+    # Pick one ambiguous lead and "enrich" it with a verified group name that
+    # CLEARLY puts it in the target industry. The re-score should bump its
+    # relevance materially upward.
+    target_invite = "amb_3"  # was "AI builders general chat" — ambiguous
+    async with SessionLocal() as s:
+        before = (
+            await s.execute(select(Lead).where(Lead.invite_id == target_invite))
+        ).scalar_one()
+        before_relevance = before.relevance
+        before_scored_at = before.last_scored_at
+
+        # Simulate enrichment landing AFTER the prior scoring: bump
+        # last_validated_at past last_scored_at.
+        await s.execute(
+            update(Lead)
+            .where(Lead.invite_id == target_invite)
+            .values(
+                verified_group_name="AI Marketing Agency Founders Network — US/UK/Dubai",
+                verified_group_description=(
+                    "Active community of marketing agency owners running AI "
+                    "automation services for clients. Weekly mastermind calls."
+                ),
+                last_validated_at=before_scored_at + timedelta(seconds=1),
+            )
+        )
+        await s.commit()
+
+    second = await score_for_campaign(cid)
+    # Only the one re-validated lead should be re-scored.
+    assert second["scored"] == 1, (
+        f"expected exactly 1 lead re-scored after enrichment, got {second}"
+    )
+
+    async with SessionLocal() as s:
+        after = (
+            await s.execute(select(Lead).where(Lead.invite_id == target_invite))
+        ).scalar_one()
+
+    assert after.last_scored_at > before_scored_at, "re-score must bump last_scored_at"
+    # Verified group name + description should push relevance up significantly.
+    # We assert >=70 because both fields explicitly state "marketing agency".
+    assert after.relevance >= 70, (
+        f"relevance should jump after enrichment with on-industry verified name, "
+        f"before={before_relevance} after={after.relevance}"
     )

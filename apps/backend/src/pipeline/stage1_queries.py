@@ -44,12 +44,21 @@ Hard requirements:
   where the bulk of public WhatsApp invites get shared.
 - The other half should target the open web (forums, blogs, community pages,
   newsletters).
+- AT LEAST 30% of queries MUST include the literal-phrase token
+  `"chat.whatsapp.com"` (with the double quotes — this is critical). This
+  forces Google to return ONLY pages whose snippet shows the invite URL
+  directly, so we can extract via regex without fetching the page. Highest-
+  precision recall mechanism we have. Use these alongside both
+  `site:reddit.com` AND open-web queries — they compose naturally:
+    "chat.whatsapp.com" "marketing agency" site:reddit.com
+    "chat.whatsapp.com" marketing agency owners group
+    "chat.whatsapp.com" "marketing agency" -india
 - Use the `-` operator to exclude every negative-location term above.
   Example: if "India" and "Indian" are excluded, append `-india -indian`
   to many queries.
 - Vary phrasing across queries: "whatsapp group", "wa group",
   "whatsapp community", "join whatsapp", "share whatsapp invite",
-  literal `"chat.whatsapp.com"`.
+  "whatsapp invite link".
 - Where appropriate, mix in native-language terms for the target locations
   (Arabic for Dubai/Saudi, Spanish for Latin America, etc.).
 - Reference industry phrasing naturally — "AI agency owners group",
@@ -118,13 +127,18 @@ def _query_target_range(max_credits_serper: int) -> tuple[int, int]:
     """Pick a query-count target that fills ~60% of the Serper budget, leaving
     headroom for failed queries (~5% empirically) and varying yield. Clamped to
     a sane band so tiny budgets still get a useful spread and huge budgets don't
-    blow the prompt.
+    blow the prompt's output-token budget.
 
       max_credits_serper=50  -> 25-35 queries
       max_credits_serper=100 -> 55-65 queries
-      max_credits_serper=300 -> ~75-85 queries (capped at 80 high)
+      max_credits_serper=300 -> 175-185 queries
+      max_credits_serper=500 -> 195-205 queries (capped at 200 high)
+
+    The 200-query ceiling is sized for gpt-4o-mini's 16k output-token cap:
+    each query is ~50 output tokens including JSON wrapping, so 200 queries
+    fit comfortably with room for the model's internal reasoning.
     """
-    target = max(30, min(80, int(0.6 * max_credits_serper)))
+    target = max(30, min(200, int(0.6 * max_credits_serper)))
     return max(25, target - 5), target + 5
 
 

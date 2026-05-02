@@ -18,23 +18,29 @@ from src.pipeline.stage5_extract import extract_for_campaign, extract_invites
         # 2. with https prefix
         ("https://chat.whatsapp.com/AbCdEf123 here", ["AbCdEf123"]),
         # 3. multiple distinct invites
-        ("first chat.whatsapp.com/A1 second chat.whatsapp.com/B2", ["A1", "B2"]),
+        (
+            "first chat.whatsapp.com/AbCdEf12 second chat.whatsapp.com/XyZpQr34",
+            ["AbCdEf12", "XyZpQr34"],
+        ),
         # 4. same invite twice → dedup within text
-        ("chat.whatsapp.com/X chat.whatsapp.com/X chat.whatsapp.com/X", ["X"]),
+        (
+            "chat.whatsapp.com/Foobar123 chat.whatsapp.com/Foobar123 chat.whatsapp.com/Foobar123",
+            ["Foobar123"],
+        ),
         # 5. trailing punctuation — period not in [A-Za-z0-9_-]
-        ("chat.whatsapp.com/AbCd.", ["AbCd"]),
+        ("chat.whatsapp.com/AbCdEf12.", ["AbCdEf12"]),
         # 6. trailing parenthesis
-        ("(chat.whatsapp.com/AbCd) foo", ["AbCd"]),
+        ("(chat.whatsapp.com/AbCdEf12) foo", ["AbCdEf12"]),
         # 7. no invite
         ("no link here at all", []),
         # 8. malformed (no id)
         ("chat.whatsapp.com/", []),
         # 9. lookalike domain — must NOT match
-        ("phishing chat.whatsapp.com.evil.com/Abc", []),
+        ("phishing chat.whatsapp.com.evil.com/AbCdEf12", []),
         # 10. subdomain prefix — must NOT match (preceded by 'b')
-        ("subchat.whatsapp.com/Abc", []),
+        ("subchat.whatsapp.com/AbCdEf12", []),
         # 11. case-insensitive
-        ("CHAT.WHATSAPP.COM/AbCd", ["AbCd"]),
+        ("CHAT.WHATSAPP.COM/AbCdEf12", ["AbCdEf12"]),
         # 12. dash + underscore in id
         ("chat.whatsapp.com/Abc-Def_123 here", ["Abc-Def_123"]),
         # 13. empty string
@@ -43,6 +49,11 @@ from src.pipeline.stage5_extract import extract_for_campaign, extract_invites
         (None, []),
         # 15. real-ish 22-char invite id
         ("join: chat.whatsapp.com/CXTbRkLm9YpQwX2YzAbCd2 here", ["CXTbRkLm9YpQwX2YzAbCd2"]),
+        # 16. too-short id (< 6 chars) — rejected as noise/commentary fragment
+        ("ping chat.whatsapp.com/X here", []),
+        ("see chat.whatsapp.com/AbCd link", []),
+        # 17. too-long id (> 30 chars) — rejected as junk string
+        ("chat.whatsapp.com/" + "A" * 50 + " end", []),
     ],
 )
 def test_extract_invites(text, expected):
@@ -51,11 +62,11 @@ def test_extract_invites(text, expected):
 
 
 def test_extract_invites_includes_context_window():
-    text = "x" * 300 + "see chat.whatsapp.com/AbCd ok" + "y" * 300
+    text = "x" * 300 + "see chat.whatsapp.com/AbCdEf12 ok" + "y" * 300
     [(invite_id, ctx)] = extract_invites(text)
-    assert invite_id == "AbCd"
+    assert invite_id == "AbCdEf12"
     # context should be ~ ±200 chars around the match (plus the match itself)
-    assert "chat.whatsapp.com/AbCd" in ctx
+    assert "chat.whatsapp.com/AbCdEf12" in ctx
     assert 200 <= len(ctx) <= 600
 
 

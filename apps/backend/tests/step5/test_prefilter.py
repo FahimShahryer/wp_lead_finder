@@ -8,16 +8,18 @@ from src.pipeline.stage3_prefilter import classify, prefilter_search_results
 # ---------- Pure classifier fixtures ----------
 
 CASES = [
-    # 1-3: snippet_hit (invite link visible)
+    # 1: reddit URL with invite leaked into the snippet — must still classify as
+    # 'reddit' so we fetch the full thread (comments typically hold many more
+    # invites than the one Google surfaced in the snippet).
     (
         "https://reddit.com/r/agency/post1",
         "AI agency owners share invites",
         "join our group: chat.whatsapp.com/AbCdEf123 — link inside",
-        "snippet_hit",
+        "reddit",
     ),
     (
         "https://example.com/blog/123",
-        "Found new chat.whatsapp.com/XyZ link",
+        "Found new chat.whatsapp.com/XyZpQr12 link",
         "summary text",
         "snippet_hit",
     ),

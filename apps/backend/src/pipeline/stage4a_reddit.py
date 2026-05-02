@@ -16,7 +16,10 @@ from src.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-REDDIT_CONCURRENCY = 3
+# Reddit script-app quota is 600 req/10 min. Each submission fetch is
+# ~1 API call + up to REPLACE_MORE_LIMIT extras → call it 4-5 calls worst case.
+# At 8 concurrent fetches that's ~40 calls/sec peak — comfortable headroom.
+REDDIT_CONCURRENCY = 8
 CACHE_TTL = timedelta(days=7)
 
 

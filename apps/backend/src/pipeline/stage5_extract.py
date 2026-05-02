@@ -2,7 +2,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from src.db.models import Lead, Query, SearchResult, UrlCache
@@ -13,8 +13,16 @@ logger = logging.getLogger(__name__)
 # `(?<![a-zA-Z0-9])` — must not be preceded by a letter/digit.
 # This rejects "subchat.whatsapp.com/X" (preceded by 'b') while accepting
 # "https://chat.whatsapp.com/X" (preceded by '/').
+#
+# `{6,30}` — invite_id length bound. Real WhatsApp invite_ids are 22 chars
+# (post-2018 format); the `{6,30}` band keeps a safety buffer for any future
+# format change while rejecting trivial false-positive matches like
+# `chat.whatsapp.com/x` or `chat.whatsapp.com/abc` that occur in commentary,
+# truncated URLs, or partial scrapes. The trailing `(?![A-Za-z0-9_-])` guard
+# stops the regex consuming only the FIRST 30 chars of a longer junk string —
+# without it, a 50-char malformed id would match as the first 30 of those.
 _INVITE_RE = re.compile(
-    r"(?<![a-zA-Z0-9])chat\.whatsapp\.com/([A-Za-z0-9_-]+)",
+    r"(?<![a-zA-Z0-9])chat\.whatsapp\.com/([A-Za-z0-9_-]{6,30})(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 CONTEXT_WINDOW = 200
@@ -39,7 +47,11 @@ def extract_invites(text: str | None) -> list[tuple[str, str]]:
 
 
 async def _upsert_lead(
-    invite_id: str, source_url: str, source_text: str, campaign_id: int
+    invite_id: str,
+    source_url: str,
+    source_title: str | None,
+    source_text: str,
+    campaign_id: int,
 ) -> bool:
     """UPSERT one lead per campaign. Returns True if a new row was inserted,
     False if a same-campaign re-discovery refreshed an existing row.
@@ -48,6 +60,9 @@ async def _upsert_lead(
     extraction inside a single campaign is idempotent (UPDATE source_text +
     last_seen), but the same invite_id under a different campaign is a
     fresh row, scored independently against that campaign's ICP.
+
+    `source_title` updates only when the new value is non-empty — re-discovery
+    on a snippet-only row shouldn't blank out a previously-captured title.
     """
     now = datetime.now(timezone.utc)
     async with SessionLocal() as s:
@@ -60,6 +75,7 @@ async def _upsert_lead(
         stmt = pg_insert(Lead).values(
             invite_id=invite_id,
             source_url=source_url,
+            source_title=source_title,
             source_text=source_text,
             campaign_id=campaign_id,
             first_seen=now,
@@ -69,6 +85,7 @@ async def _upsert_lead(
             index_elements=["campaign_id", "invite_id"],
             set_={
                 "source_text": stmt.excluded.source_text,
+                "source_title": func.coalesce(stmt.excluded.source_title, Lead.source_title),
                 "last_seen": now,
             },
         )
@@ -141,7 +158,7 @@ async def extract_for_campaign(campaign_id: int) -> dict[str, int]:
             continue
 
         for invite_id, context in invites:
-            is_new = await _upsert_lead(invite_id, url, context, campaign_id)
+            is_new = await _upsert_lead(invite_id, url, title, context, campaign_id)
             counts["new_leads" if is_new else "updated_leads"] += 1
 
         counts["extracted_rows"] += 1

@@ -100,6 +100,10 @@ class Lead(Base):
     invite_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SERP/page title for source_url, captured at extraction time. Strongest
+    # single discriminator for relevance scoring — a Reddit thread titled
+    # "AI Agency Founders Group" tells the scorer everything in 5 words.
+    source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     detected_geo: Mapped[str | None] = mapped_column(String(8), nullable=True)

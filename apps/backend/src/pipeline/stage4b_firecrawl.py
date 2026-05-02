@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 FIRECRAWL_CONCURRENCY = 2
 CACHE_TTL = timedelta(days=7)
 
+# Retry transient Firecrawl errors (timeouts, rate limits, 5xx) before giving
+# up. Permanent errors (paywall, unsupported site) bypass this and fail fast.
+# Without this, every transient blip permanently lost every invite on the page.
+TRANSIENT_RETRIES = 2
+TRANSIENT_BACKOFF_SECONDS = (1.5, 4.0)  # one entry per retry attempt
+
 
 async def _get_fresh_cached_markdown(url: str) -> str | None:
     async with SessionLocal() as s:
@@ -114,15 +120,40 @@ async def fetch_pending_firecrawl(campaign_id: int) -> dict[str, int]:
                 counts["budget_skipped"] += 1
                 return
 
-            try:
-                markdown = await scrape_markdown(url)
-            except FirecrawlPermanentError as e:
-                logger.info("firecrawl fetch_failed sr=%d url=%s reason=%s", sr_id, url, e.reason)
-                counts["failed"] += 1
-                await _set_status(sr_id, "fetch_failed")
-                return
-            except Exception as e:
-                logger.exception("firecrawl unexpected error sr=%d url=%s: %s", sr_id, url, e)
+            markdown: str | None = None
+            for attempt in range(TRANSIENT_RETRIES + 1):
+                try:
+                    markdown = await scrape_markdown(url)
+                    break
+                except FirecrawlPermanentError as e:
+                    # Site-not-supported / paywall / 4xx — never retry.
+                    logger.info("firecrawl fetch_failed sr=%d url=%s reason=%s", sr_id, url, e.reason)
+                    counts["failed"] += 1
+                    await _set_status(sr_id, "fetch_failed")
+                    return
+                except Exception as e:
+                    # Transient: timeout, rate-limit, server_error. The client
+                    # already classified these and re-raised the original
+                    # exception. Back off and retry.
+                    if attempt < TRANSIENT_RETRIES:
+                        wait = TRANSIENT_BACKOFF_SECONDS[attempt]
+                        logger.warning(
+                            "firecrawl transient error sr=%d url=%s attempt=%d/%d "
+                            "(%s: %s); sleeping %.1fs",
+                            sr_id, url, attempt + 1, TRANSIENT_RETRIES + 1,
+                            type(e).__name__, e, wait,
+                        )
+                        await asyncio.sleep(wait)
+                        continue
+                    logger.warning(
+                        "firecrawl transient retries exhausted sr=%d url=%s (%s: %s)",
+                        sr_id, url, type(e).__name__, e,
+                    )
+                    counts["failed"] += 1
+                    await _set_status(sr_id, "fetch_failed")
+                    return
+
+            if markdown is None:  # defensive — should be unreachable
                 counts["failed"] += 1
                 await _set_status(sr_id, "fetch_failed")
                 return

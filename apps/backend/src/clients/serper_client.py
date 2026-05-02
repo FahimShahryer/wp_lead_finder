@@ -9,6 +9,10 @@ from src.core.config import settings
 logger = logging.getLogger(__name__)
 
 SERPER_URL = "https://google.serper.dev/search"
+# Serper docs claim `num` accepts up to 100, but on the free / starter plan tier
+# the API rejects num > 20 with HTTP 400 ("Query not allowed"), AND only ever
+# returns ~10 organic results regardless of the value. Bumping this only pays
+# off after upgrading the Serper plan; keep at 10 for the current tier.
 DEFAULT_NUM_RESULTS = 10
 MAX_RETRIES = 5
 
@@ -49,7 +53,8 @@ async def search(query: str, num: int = DEFAULT_NUM_RESULTS) -> list[SerperResul
     """Run a single Serper search. Retries on 429 (honoring Retry-After) and 5xx
     with exponential backoff. Raises SerperError after MAX_RETRIES."""
     client = _get_client()
-    payload = {"q": query, "num": num}
+    # autocorrect=False so Google doesn't rewrite jargon like "wa group" → "we group".
+    payload = {"q": query, "num": num, "autocorrect": False}
 
     for attempt in range(MAX_RETRIES):
         try:

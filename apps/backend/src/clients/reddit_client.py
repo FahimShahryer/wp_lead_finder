@@ -15,9 +15,18 @@ from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# How many top-level comments to render. More than this is rarely useful for
-# regex extraction; submissions with hundreds of comments get truncated.
-TOP_COMMENT_LIMIT = 30
+# Cap on total comments (top-level + nested replies, after replace_more
+# expansion) that we render to markdown for invite extraction. Megathreads
+# like "share your whatsapp groups for X" routinely have 100-500 invites
+# scattered across replies, so we want generous coverage. The cap exists
+# only to bound markdown size for very long threads.
+COMMENT_LIMIT = 200
+
+# How many "load more comments" stubs to expand. Each expansion is one
+# extra Reddit API call. limit=0 discards every stub (today's behavior —
+# loses replies behind them). limit=3 catches the bulk of nested invites
+# in megathreads at a small API-budget cost.
+REPLACE_MORE_LIMIT = 3
 
 
 class RedditFetchError(Exception):
@@ -105,14 +114,22 @@ async def _top_comments(submission: Submission) -> list:
     try:
         # NB: comment_sort can't be changed after load() — submission is already
         # fetched with default sort. Default ('best') is fine for regex extraction.
-        # limit=0 flattens "load more comments" stubs (deletes them — we don't
-        # want to make extra API calls for low-value comments).
-        await submission.comments.replace_more(limit=0)
-        comments = list(submission.comments)
+        #
+        # replace_more(limit=N) expands up to N "load more comments" stubs into
+        # actual comments. Each expansion is one extra API call. With limit=3 we
+        # catch the bulk of nested replies in megathreads while bounding cost.
+        #
+        # comments.list() returns a FLATTENED list of every loaded comment
+        # (top-level + every nested reply at every depth) — much higher recall
+        # than iterating `submission.comments` directly, which yields top-level
+        # only. This is critical for "share your whatsapp groups for X" megathreads
+        # where most invites live in reply chains, not the top-level comments.
+        await submission.comments.replace_more(limit=REPLACE_MORE_LIMIT)
+        comments = submission.comments.list()
     except Exception as e:
         logger.warning("could not load comments for %s: %s", submission.id, e)
         return []
-    return comments[:TOP_COMMENT_LIMIT]
+    return comments[:COMMENT_LIMIT]
 
 
 def _safe_author(obj) -> str:
