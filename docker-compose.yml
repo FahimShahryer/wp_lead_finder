@@ -8,7 +8,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U app -d wp2"]
       interval: 5s
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -62,7 +62,7 @@ services:
       WA_SIDECAR_URL: http://wa-sidecar:3001
       WA_SIDECAR_SECRET: dev-internal-secret-change-me
     ports:
-      - "8000:8000"
+      - "8001:8000"
     volumes:
       - ./apps/backend:/app
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
@@ -100,10 +100,10 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "3010:3000"
     environment:
       # Browser-side: must be reachable from the user's machine, hence localhost.
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8001
     volumes:
       - ./apps/frontend:/app
       # Anonymous volume preserves the in-image node_modules even though /app is bind-mounted.

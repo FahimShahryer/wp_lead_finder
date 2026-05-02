@@ -8,16 +8,20 @@ import {
   Search,
   Send,
   ShieldAlert,
+  Tag as TagIcon,
   X,
 } from "lucide-react";
 
 import {
   BroadcastDetail,
   BroadcastJob,
+  Conversation,
+  InboxTag,
   WhatsAppGroup,
   WhatsAppNumber,
   api,
 } from "@/lib/api";
+import { tagColors } from "@/lib/tag-colors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -83,6 +87,9 @@ function ComposeStep({
   onStarted: (jobId: number) => void;
 }) {
   const [groups, setGroups] = useState<WhatsAppGroup[] | null>(null);
+  const [convs, setConvs] = useState<Conversation[] | null>(null);
+  const [allTags, setAllTags] = useState<InboxTag[] | null>(null);
+  const [tagFilter, setTagFilter] = useState<Set<string>>(new Set()); // tag names
   const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -96,8 +103,17 @@ function ComposeStep({
     let cancelled = false;
     (async () => {
       try {
-        const gs = await api.listNumberGroups(number.id);
-        if (!cancelled) setGroups(gs);
+        // Parallel: groups (live from sidecar), conversations for this number
+        // (so we can map jid -> tags), and the global inbox-tag list.
+        const [gs, cs, ts] = await Promise.all([
+          api.listNumberGroups(number.id),
+          api.listConversations({ number_id: number.id, kind: "group" }),
+          api.listInboxTags(),
+        ]);
+        if (cancelled) return;
+        setGroups(gs);
+        setConvs(cs);
+        setAllTags(ts);
       } catch (e) {
         if (!cancelled) setLoadError(e instanceof Error ? e.message : String(e));
       }
@@ -107,12 +123,47 @@ function ComposeStep({
     };
   }, [number.id]);
 
+  // jid → set of tag names attached to that conversation (under this number).
+  const tagsByJid = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const c of convs ?? []) map.set(c.jid, new Set(c.tags));
+    return map;
+  }, [convs]);
+
+  // Tags actually present on at least one of this number's group convs —
+  // those are the only tags worth offering as filters.
+  const availableTags = useMemo(() => {
+    const seen = new Set<string>();
+    for (const c of convs ?? []) for (const t of c.tags) seen.add(t);
+    return (allTags ?? []).filter((t) => seen.has(t.name));
+  }, [allTags, convs]);
+
+  function toggleTagFilter(name: string) {
+    setTagFilter((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
+
   const filtered = useMemo(() => {
     if (!groups) return [];
     const q = search.trim().toLowerCase();
-    if (!q) return groups;
-    return groups.filter((g) => g.subject.toLowerCase().includes(q));
-  }, [groups, search]);
+    let list = groups;
+    if (q) list = list.filter((g) => g.subject.toLowerCase().includes(q));
+    if (tagFilter.size > 0) {
+      // OR semantics across selected tags. A group matches if its conversation
+      // (under this number) carries any of the picked tags.
+      list = list.filter((g) => {
+        const ts = tagsByJid.get(g.jid);
+        if (!ts) return false;
+        for (const t of tagFilter) if (ts.has(t)) return true;
+        return false;
+      });
+    }
+    return list;
+  }, [groups, search, tagFilter, tagsByJid]);
 
   function toggle(jid: string) {
     setSelected((prev) => {
@@ -178,26 +229,51 @@ function ComposeStep({
     <div className="space-y-4">
       {/* Group picker */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between">
-          <Label>Groups ({selected.size} selected)</Label>
-          {filtered.length > 0 && (
-            <div className="flex gap-2 text-xs">
-              <button
-                onClick={() => selectAll(filtered)}
-                className="text-muted-foreground hover:underline"
-              >
-                Select all{search ? " visible" : ""}
-              </button>
-              {selected.size > 0 && (
-                <button
-                  onClick={() => setSelected(new Set())}
-                  className="text-muted-foreground hover:underline"
+        <div className="flex items-center justify-between gap-2">
+          <Label className="shrink-0">Groups ({selected.size} selected)</Label>
+          {filtered.length > 0 && (() => {
+            // Excludes admin-only groups (sending will fail unless we're admin),
+            // mirrors selectAll() behavior so the count matches what'll actually be added.
+            const selectable = filtered.filter((g) => !g.announce);
+            const newlyAdded = selectable.filter((g) => !selected.has(g.jid)).length;
+            const allSelected = newlyAdded === 0 && selectable.length > 0;
+            const filterLabel =
+              tagFilter.size > 0
+                ? Array.from(tagFilter).join(" + ")
+                : search
+                ? "matching"
+                : "groups";
+            return (
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => selectAll(filtered)}
+                  disabled={allSelected}
+                  className="h-7 text-[11px]"
+                  title={
+                    allSelected
+                      ? "Already selected"
+                      : `Select all ${selectable.length} ${filterLabel} group${selectable.length === 1 ? "" : "s"} (admins-only excluded)`
+                  }
                 >
-                  Clear
-                </button>
-              )}
-            </div>
-          )}
+                  {allSelected
+                    ? `All ${selectable.length} selected`
+                    : `Select all ${filterLabel} (${selectable.length})`}
+                </Button>
+                {selected.size > 0 && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setSelected(new Set())}
+                    className="h-7 text-[11px]"
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         <div className="relative">
@@ -210,6 +286,39 @@ function ComposeStep({
             disabled={!groups}
           />
         </div>
+
+        {availableTags.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground mr-1">
+              Filter by tag:
+            </span>
+            {availableTags.map((t) => {
+              const active = tagFilter.has(t.name);
+              const c = tagColors(t.name);
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => toggleTagFilter(t.name)}
+                  className={
+                    "inline-flex items-center gap-1 rounded-full ring-1 px-2 py-0.5 text-[11px] font-medium transition-colors " +
+                    (active ? c.active : c.idle + " hover:brightness-110")
+                  }
+                >
+                  <TagIcon className="h-2.5 w-2.5" />
+                  {t.name}
+                </button>
+              );
+            })}
+            {tagFilter.size > 0 && (
+              <button
+                onClick={() => setTagFilter(new Set())}
+                className="text-[10px] text-muted-foreground hover:underline ml-1"
+              >
+                clear
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="max-h-64 overflow-y-auto rounded-md border bg-background">
           {loadError && (
@@ -227,6 +336,7 @@ function ComposeStep({
           )}
           {filtered.map((g) => {
             const checked = selected.has(g.jid);
+            const groupTags = tagsByJid.get(g.jid);
             return (
               <label
                 key={g.jid}
@@ -251,8 +361,30 @@ function ComposeStep({
                       </span>
                     )}
                   </div>
-                  <div className="text-[10px] text-muted-foreground">
-                    {g.participants_count} member{g.participants_count === 1 ? "" : "s"}
+                  <div className="text-[10px] text-muted-foreground flex flex-wrap items-center gap-1">
+                    <span>
+                      {g.participants_count} member{g.participants_count === 1 ? "" : "s"}
+                    </span>
+                    {groupTags && groupTags.size > 0 && (
+                      <>
+                        <span>·</span>
+                        {Array.from(groupTags).map((t) => {
+                          const c = tagColors(t);
+                          return (
+                            <span
+                              key={t}
+                              className={
+                                "inline-flex items-center gap-0.5 rounded-full ring-1 px-1.5 py-0 text-[9px] font-medium " +
+                                c.idle
+                              }
+                            >
+                              <TagIcon className="h-2 w-2" />
+                              {t}
+                            </span>
+                          );
+                        })}
+                      </>
+                    )}
                   </div>
                 </div>
               </label>

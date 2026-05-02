@@ -194,6 +194,14 @@ export type Conversation = {
   last_message_at: string | null;
   last_message_preview: string | null;
   unread_count: number;
+  tags: string[];
+};
+
+export type InboxTag = {
+  id: number;
+  name: string;
+  color: string | null;
+  conversations_count: number;
 };
 
 export type ConversationMessage = {
@@ -340,13 +348,35 @@ export const api = {
   },
   getBroadcast: (jobId: number) =>
     request<BroadcastDetail>(`/broadcasts/${jobId}`),
-  listConversations: (opts: { number_id?: number; kind?: ChatKind } = {}) => {
+  listConversations: (
+    opts: { number_id?: number; kind?: ChatKind; tag_ids?: number[] } = {},
+  ) => {
     const params = new URLSearchParams();
     if (opts.number_id !== undefined) params.set("number_id", String(opts.number_id));
     if (opts.kind) params.set("kind", opts.kind);
+    if (opts.tag_ids?.length) {
+      for (const t of opts.tag_ids) params.append("tag_id", String(t));
+    }
     const qs = params.toString();
     return request<Conversation[]>(`/conversations${qs ? `?${qs}` : ""}`);
   },
+  listInboxTags: () => request<InboxTag[]>(`/inbox/tags`),
+  createInboxTag: (name: string, color?: string) =>
+    request<InboxTag>(`/inbox/tags`, {
+      method: "POST",
+      body: JSON.stringify({ name, color }),
+    }),
+  deleteInboxTag: (id: number) =>
+    request<void>(`/inbox/tags/${id}`, { method: "DELETE" }),
+  attachConversationTag: (convId: number, tagId: number) =>
+    request<void>(`/conversations/${convId}/tags`, {
+      method: "POST",
+      body: JSON.stringify({ tag_id: tagId }),
+    }),
+  detachConversationTag: (convId: number, tagId: number) =>
+    request<void>(`/conversations/${convId}/tags/${tagId}`, {
+      method: "DELETE",
+    }),
   listConversationMessages: (convId: number) =>
     request<ConversationMessage[]>(`/conversations/${convId}/messages`),
   sendReply: (convId: number, body: string) =>

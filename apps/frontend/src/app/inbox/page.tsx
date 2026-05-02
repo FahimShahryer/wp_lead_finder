@@ -7,21 +7,27 @@ import {
   ArrowLeft,
   Inbox as InboxIcon,
   Loader2,
+  Plus,
   Search,
   Send,
   ShieldAlert,
+  Tag as TagIcon,
+  Trash2,
   Users,
   User as UserIcon,
+  X,
 } from "lucide-react";
 
 import {
   ChatKind,
   Conversation,
   ConversationMessage,
+  InboxTag,
   WhatsAppNumber,
   api,
   fetcher,
 } from "@/lib/api";
+import { tagColors } from "@/lib/tag-colors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -85,21 +91,31 @@ function initialsOf(name: string): string {
 export default function InboxPage() {
   const [filter, setFilter] = useState<KindFilter>("all");
   const [numberFilter, setNumberFilter] = useState<number | "all">("all");
+  const [tagFilter, setTagFilter] = useState<number[]>([]);
   const [search, setSearch] = useState("");
   const [activeId, setActiveId] = useState<number | null>(null);
 
   const { data: numbers } = useSWR<WhatsAppNumber[]>("/numbers", fetcher);
+  const tagsKey = "/inbox/tags";
+  const { data: inboxTags } = useSWR<InboxTag[]>(tagsKey, fetcher);
 
-  // Server filters: kind=group/dm + number_id. 'unread' is applied
+  // Server filters: kind=group/dm + number_id + tag_id. 'unread' is applied
   // client-side because the server doesn't have an unread filter.
   const params = new URLSearchParams();
   if (filter === "groups") params.set("kind", "group");
   if (filter === "dms") params.set("kind", "dm");
   if (numberFilter !== "all") params.set("number_id", String(numberFilter));
+  for (const t of tagFilter) params.append("tag_id", String(t));
   const convsKey = `/conversations${params.toString() ? `?${params}` : ""}`;
   const { data: conversations } = useSWR<Conversation[]>(convsKey, fetcher, {
     refreshInterval: 3000,
   });
+
+  function toggleTagFilter(id: number) {
+    setTagFilter((prev) =>
+      prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id],
+    );
+  }
 
   const visible = useMemo(() => {
     if (!conversations) return undefined;
@@ -228,6 +244,41 @@ export default function InboxPage() {
                 ))}
               </div>
             )}
+
+            {inboxTags && inboxTags.length > 0 && (
+              <div className="flex flex-wrap gap-1 items-center">
+                <span className="text-[10px] uppercase tracking-wider text-muted-foreground mr-1">
+                  Tags:
+                </span>
+                {inboxTags.map((t) => {
+                  const active = tagFilter.includes(t.id);
+                  const c = tagColors(t.name);
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => toggleTagFilter(t.id)}
+                      className={
+                        "inline-flex items-center gap-1 rounded-full ring-1 px-2 py-0.5 text-[11px] font-medium transition-colors " +
+                        (active ? c.active : c.idle + " hover:brightness-110")
+                      }
+                      title={`${t.conversations_count} conversation${t.conversations_count === 1 ? "" : "s"}`}
+                    >
+                      <TagIcon className="h-2.5 w-2.5" />
+                      {t.name}
+                      <span className="opacity-70 tabular-nums">{t.conversations_count}</span>
+                    </button>
+                  );
+                })}
+                {tagFilter.length > 0 && (
+                  <button
+                    onClick={() => setTagFilter([])}
+                    className="text-[10px] text-muted-foreground hover:underline ml-1"
+                  >
+                    clear
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <ConversationList
@@ -244,7 +295,14 @@ export default function InboxPage() {
         {/* Right pane: active thread */}
         <div className="rounded-md border bg-card flex flex-col min-h-[70vh]">
           {active ? (
-            <Thread conversation={active} />
+            <Thread
+              conversation={active}
+              allTags={inboxTags ?? []}
+              onTagsChanged={() => {
+                mutate(convsKey);
+                mutate(tagsKey);
+              }}
+            />
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-sm text-muted-foreground gap-2 p-8">
               <InboxIcon className="h-10 w-10 opacity-30" />
@@ -351,7 +409,7 @@ function ConversationList({
                   </span>
                 )}
               </div>
-              <div className="flex items-center gap-1.5 mt-1">
+              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                 <span
                   className={
                     "inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider font-bold " +
@@ -372,6 +430,21 @@ function ConversationList({
                     </>
                   )}
                 </span>
+                {c.tags.map((t) => {
+                  const tc = tagColors(t);
+                  return (
+                    <span
+                      key={t}
+                      className={
+                        "inline-flex items-center gap-0.5 rounded-full ring-1 px-1.5 py-0.5 text-[10px] font-medium " +
+                        tc.idle
+                      }
+                    >
+                      <TagIcon className="h-2.5 w-2.5" />
+                      {t}
+                    </span>
+                  );
+                })}
                 <span className="text-[10px] text-muted-foreground/80 truncate">
                   via {c.number_display_name}
                 </span>
@@ -386,7 +459,15 @@ function ConversationList({
 
 // ---------- Active thread ----------
 
-function Thread({ conversation }: { conversation: Conversation }) {
+function Thread({
+  conversation,
+  allTags,
+  onTagsChanged,
+}: {
+  conversation: Conversation;
+  allTags: InboxTag[];
+  onTagsChanged: () => void;
+}) {
   const messagesKey = `/conversations/${conversation.id}/messages`;
   const { data: messages } = useSWR<ConversationMessage[]>(messagesKey, fetcher, {
     refreshInterval: 3000,
@@ -467,6 +548,11 @@ function Thread({ conversation }: { conversation: Conversation }) {
               {conversation.number_display_name}
             </span>
           </div>
+          <ConversationTagsRow
+            conversation={conversation}
+            allTags={allTags}
+            onChanged={onTagsChanged}
+          />
         </div>
       </div>
 
@@ -534,6 +620,169 @@ function Thread({ conversation }: { conversation: Conversation }) {
           ⌘/Ctrl + Enter to send
         </div>
       </div>
+    </div>
+  );
+}
+
+// Inline tag editor on the active thread header. Shows attached tags with
+// a remove × per chip, plus a "+ Tag" button that opens a small popover where
+// the user can pick an existing tag or type a new one (create-on-the-fly).
+function ConversationTagsRow({
+  conversation,
+  allTags,
+  onChanged,
+}: {
+  conversation: Conversation;
+  allTags: InboxTag[];
+  onChanged: () => void;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const attached = new Set(conversation.tags);
+
+  async function detach(tagName: string) {
+    const tag = allTags.find((t) => t.name === tagName);
+    if (!tag) return;
+    setBusy(true);
+    try {
+      await api.detachConversationTag(conversation.id, tag.id);
+      onChanged();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function attach(tagId: number) {
+    setBusy(true);
+    try {
+      await api.attachConversationTag(conversation.id, tagId);
+      onChanged();
+      setPickerOpen(false);
+      setDraft("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createAndAttach() {
+    const name = draft.trim().toLowerCase();
+    if (!name) return;
+    setBusy(true);
+    try {
+      const tag = await api.createInboxTag(name);
+      await api.attachConversationTag(conversation.id, tag.id);
+      onChanged();
+      setPickerOpen(false);
+      setDraft("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Tags that aren't already on this conversation, optionally narrowed by draft.
+  const q = draft.trim().toLowerCase();
+  const candidates = allTags
+    .filter((t) => !attached.has(t.name))
+    .filter((t) => !q || t.name.includes(q));
+  const exactExists = allTags.some((t) => t.name === q);
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1 relative">
+      {conversation.tags.map((name) => {
+        const c = tagColors(name);
+        return (
+          <span
+            key={name}
+            className={
+              "inline-flex items-center gap-1 rounded-full ring-1 px-2 py-0.5 text-[10px] font-medium " +
+              c.idle
+            }
+          >
+            <TagIcon className="h-2.5 w-2.5" />
+            {name}
+            <button
+              onClick={() => detach(name)}
+              disabled={busy}
+              className="hover:opacity-70 disabled:opacity-50"
+              aria-label={`Remove tag ${name}`}
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </span>
+        );
+      })}
+      <button
+        onClick={() => setPickerOpen((o) => !o)}
+        disabled={busy}
+        className="inline-flex items-center gap-0.5 rounded-full border border-dashed border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground hover:bg-muted"
+      >
+        <Plus className="h-2.5 w-2.5" /> Tag
+      </button>
+
+      {pickerOpen && (
+        <div className="absolute top-full left-0 mt-1 z-20 w-64 rounded-md border bg-popover shadow-lg p-2 space-y-1.5">
+          <Input
+            autoFocus
+            placeholder="Type tag name…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && q && !exactExists) {
+                e.preventDefault();
+                createAndAttach();
+              }
+              if (e.key === "Escape") {
+                setPickerOpen(false);
+                setDraft("");
+              }
+            }}
+            className="h-8 text-xs"
+          />
+          {candidates.length > 0 && (
+            <div className="max-h-40 overflow-y-auto space-y-0.5">
+              {candidates.map((t) => {
+                const c = tagColors(t.name);
+                return (
+                  <button
+                    key={t.id}
+                    onClick={() => attach(t.id)}
+                    disabled={busy}
+                    className="w-full text-left px-2 py-1 text-xs rounded hover:bg-muted flex items-center justify-between"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className={"h-2 w-2 rounded-full " + c.dot} />
+                      {t.name}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground tabular-nums">
+                      {t.conversations_count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {q && !exactExists && (
+            <button
+              onClick={createAndAttach}
+              disabled={busy}
+              className="w-full text-left px-2 py-1 text-xs rounded hover:bg-muted text-violet-700 dark:text-violet-300"
+            >
+              + Create &ldquo;{q}&rdquo;
+            </button>
+          )}
+          {q && exactExists && candidates.length === 0 && attached.has(q) && (
+            <div className="px-2 py-1 text-[11px] text-muted-foreground">
+              Tag already attached.
+            </div>
+          )}
+          {!q && candidates.length === 0 && (
+            <div className="px-2 py-1 text-[11px] text-muted-foreground">
+              No more tags. Type to create one.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

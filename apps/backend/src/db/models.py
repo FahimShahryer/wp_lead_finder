@@ -282,6 +282,40 @@ class OutboundMessage(Base):
     )
 
 
+class InboxTag(Base):
+    """Global label pool for the shared inbox (Module 6 + 5).
+
+    Distinct from `tags`/`lead_tags` (which are scoped per campaign and
+    per-lead). Inbox tags span every connected number; the user creates them
+    once and applies them to any conversation (DM or group). The same tags
+    feed the broadcast modal's group-filter so a "AI" tag attached to N
+    group conversations narrows the broadcast targets in one click.
+    """
+
+    __tablename__ = "inbox_tags"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
+    color: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ConversationTag(Base):
+    __tablename__ = "conversation_tags"
+
+    conversation_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True
+    )
+    tag_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("inbox_tags.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class WhatsAppNumber(Base):
     """A WhatsApp account the user has linked via QR scan. Module 7.
 

@@ -21,6 +21,8 @@ from src.db.models import (
     BroadcastJob,
     Campaign,
     Conversation,
+    ConversationTag,
+    InboxTag,
     Lead,
     LeadTag,
     Message,
@@ -60,10 +62,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="wp2-leadfinder", lifespan=lifespan)
 
-# Browser at :3000 talks to API at :8000 cross-origin during local dev.
+# Browser talks to API cross-origin during local dev. We accept both the
+# default 3000 host port and the alt 3010 used when sharing the box with
+# another stack that's already on 3000.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3010",
+        "http://127.0.0.1:3010",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1326,6 +1335,7 @@ class ConversationResponse(BaseModel):
     last_message_at: datetime | None
     last_message_preview: str | None
     unread_count: int
+    tags: list[str] = []  # inbox_tags.name list, alphabetical
 
 
 class MessageResponse(BaseModel):
@@ -1343,10 +1353,12 @@ async def list_conversations(
     session: Annotated[AsyncSession, Depends(get_session)],
     number_id: int | None = None,
     kind: Literal["dm", "group"] | None = None,
+    tag_id: Annotated[list[int] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 100,
 ):
     """Unified inbox feed. Default: every conversation across every connected
-    number, newest message first. Filterable by number and chat kind."""
+    number, newest message first. Filterable by number, kind, and inbox tag(s)
+    (OR semantics — pass tag_id multiple times for multiple tags)."""
     stmt = (
         select(Conversation, WhatsAppNumber.display_name)
         .join(WhatsAppNumber, WhatsAppNumber.id == Conversation.number_id)
@@ -1355,10 +1367,36 @@ async def list_conversations(
         stmt = stmt.where(Conversation.number_id == number_id)
     if kind is not None:
         stmt = stmt.where(Conversation.kind == kind)
+    if tag_id:
+        stmt = stmt.where(
+            Conversation.id.in_(
+                select(ConversationTag.conversation_id).where(
+                    ConversationTag.tag_id.in_(tag_id)
+                )
+            )
+        )
     stmt = stmt.order_by(
         desc(Conversation.last_message_at), desc(Conversation.id)
     ).limit(limit)
     rows = list((await session.execute(stmt)).all())
+
+    # Hydrate tags in one shot rather than N+1.
+    conv_ids = [c.id for c, _ in rows]
+    tags_by_conv: dict[int, list[str]] = {}
+    if conv_ids:
+        tag_rows = list(
+            (
+                await session.execute(
+                    select(ConversationTag.conversation_id, InboxTag.name)
+                    .join(InboxTag, InboxTag.id == ConversationTag.tag_id)
+                    .where(ConversationTag.conversation_id.in_(conv_ids))
+                    .order_by(InboxTag.name)
+                )
+            ).all()
+        )
+        for cid, name in tag_rows:
+            tags_by_conv.setdefault(cid, []).append(name)
+
     return [
         ConversationResponse(
             id=c.id,
@@ -1370,9 +1408,140 @@ async def list_conversations(
             last_message_at=c.last_message_at,
             last_message_preview=c.last_message_preview,
             unread_count=c.unread_count,
+            tags=tags_by_conv.get(c.id, []),
         )
         for c, display_name in rows
     ]
+
+
+# ---------- Inbox tag CRUD + attach/detach ----------
+
+
+class InboxTagResponse(BaseModel):
+    id: int
+    name: str
+    color: str | None
+    conversations_count: int
+
+
+class CreateInboxTagRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    color: str | None = Field(default=None, max_length=16)
+
+
+def _normalize_inbox_tag(name: str) -> str:
+    """Match the lower-case + trim convention so 'AI' and 'ai' don't dupe."""
+    return name.strip().lower()[:40]
+
+
+@app.get("/inbox/tags", response_model=list[InboxTagResponse])
+async def list_inbox_tags(
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    rows = (
+        await session.execute(
+            select(
+                InboxTag.id,
+                InboxTag.name,
+                InboxTag.color,
+                func.count(ConversationTag.conversation_id),
+            )
+            .outerjoin(ConversationTag, ConversationTag.tag_id == InboxTag.id)
+            .group_by(InboxTag.id)
+            .order_by(InboxTag.name)
+        )
+    ).all()
+    return [
+        InboxTagResponse(id=r[0], name=r[1], color=r[2], conversations_count=r[3])
+        for r in rows
+    ]
+
+
+@app.post(
+    "/inbox/tags", status_code=201, response_model=InboxTagResponse
+)
+async def create_inbox_tag(
+    req: CreateInboxTagRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Create-or-return: if a tag with the normalized name already exists,
+    return it (idempotent). Lets the frontend do create-on-the-fly UX
+    without worrying about duplicate-name errors."""
+    name = _normalize_inbox_tag(req.name)
+    if not name:
+        raise HTTPException(400, "tag name cannot be empty")
+    existing = await session.scalar(
+        select(InboxTag).where(InboxTag.name == name)
+    )
+    if existing is not None:
+        return InboxTagResponse(
+            id=existing.id, name=existing.name, color=existing.color, conversations_count=0
+        )
+    tag = InboxTag(name=name, color=req.color)
+    session.add(tag)
+    await session.commit()
+    await session.refresh(tag)
+    return InboxTagResponse(
+        id=tag.id, name=tag.name, color=tag.color, conversations_count=0
+    )
+
+
+@app.delete("/inbox/tags/{tag_id}", status_code=204)
+async def delete_inbox_tag(
+    tag_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    tag = await session.get(InboxTag, tag_id)
+    if tag is None:
+        raise HTTPException(404, f"tag {tag_id} not found")
+    await session.delete(tag)
+    await session.commit()
+    return None
+
+
+class AttachTagRequest(BaseModel):
+    tag_id: int
+
+
+@app.post("/conversations/{conv_id}/tags", status_code=204)
+async def attach_conversation_tag(
+    conv_id: int,
+    req: AttachTagRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    conv = await session.get(Conversation, conv_id)
+    if conv is None:
+        raise HTTPException(404, f"conversation {conv_id} not found")
+    tag = await session.get(InboxTag, req.tag_id)
+    if tag is None:
+        raise HTTPException(404, f"tag {req.tag_id} not found")
+    # Idempotent attach via ON CONFLICT DO NOTHING.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    await session.execute(
+        pg_insert(ConversationTag)
+        .values(conversation_id=conv_id, tag_id=req.tag_id)
+        .on_conflict_do_nothing(index_elements=["conversation_id", "tag_id"])
+    )
+    await session.commit()
+    return None
+
+
+@app.delete(
+    "/conversations/{conv_id}/tags/{tag_id}", status_code=204
+)
+async def detach_conversation_tag(
+    conv_id: int,
+    tag_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    await session.execute(
+        delete(ConversationTag).where(
+            ConversationTag.conversation_id == conv_id,
+            ConversationTag.tag_id == tag_id,
+        )
+    )
+    await session.commit()
+    return None
 
 
 @app.get(
