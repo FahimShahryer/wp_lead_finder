@@ -172,6 +172,45 @@ async def test_scoring_is_idempotent_on_rerun():
     assert second["missing"] == 0
 
 
+def test_source_bonus_curve():
+    """Source-recurrence bonus shape: 1 → 0, sqrt curve, capped at 20."""
+    from src.pipeline.stage6_score import _source_bonus
+
+    # 1 source = baseline, no boost.
+    assert _source_bonus(1) == 0
+    assert _source_bonus(0) == 0
+    assert _source_bonus(None) == 0
+    # 2 sources: round(5 * sqrt(1)) = 5
+    assert _source_bonus(2) == 5
+    # 5 sources: round(5 * sqrt(4)) = 10
+    assert _source_bonus(5) == 10
+    # 17 sources: round(5 * sqrt(16)) = 20 (boundary)
+    assert _source_bonus(17) == 20
+    # Large counts cap at 20.
+    assert _source_bonus(100) == 20
+    assert _source_bonus(10_000) == 20
+
+
+def test_total_score_applies_source_bonus_and_caps_at_100():
+    """_total combines the LLM-weighted score and the source-recurrence bonus,
+    clipping to 100 so a near-max lead with many sources doesn't overflow."""
+    from src.pipeline.stage6_score import LeadScoreItem, _total
+
+    item = LeadScoreItem(invite_id="x", relevance=80, geo_fit=80, engagement=80)
+    # base = 0.5*80 + 0.3*80 + 0.2*80 = 80
+    assert _total(item, source_count=1) == 80
+    # base 80 + bonus 5 (2 sources) = 85
+    assert _total(item, source_count=2) == 85
+
+    near_max = LeadScoreItem(invite_id="y", relevance=100, geo_fit=100, engagement=100)
+    # base 100 + bonus 10 (5 sources) → clipped to 100
+    assert _total(near_max, source_count=5) == 100
+
+    junk = LeadScoreItem(invite_id="z", relevance=0, geo_fit=0, engagement=0)
+    # Even with many sources, base 0 + bonus 20 = 20. Junk stays junk.
+    assert _total(junk, source_count=100) == 20
+
+
 async def test_scoring_picks_up_leads_re_validated_after_last_scoring():
     """When WA enrichment runs after a lead was scored on noisy snippet text,
     a re-score with the verified_group_name should be triggered. This is the

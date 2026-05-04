@@ -248,3 +248,91 @@ async def test_no_invite_in_content_marks_extracted_without_creating_lead():
     async with SessionLocal() as s:
         sr = (await s.execute(select(SearchResult))).scalar_one()
     assert sr.status == "extracted"
+
+
+# ---------- Source-recurrence: distinct-URL counting ----------
+
+
+async def test_source_count_increments_on_distinct_urls_only():
+    """An invite_id discovered on three different URLs should end with
+    source_count=3. Re-extracting the SAME URL (e.g. on idempotent re-run)
+    must NOT bump the counter."""
+    from src.db.models import LeadSourceUrl
+
+    cid = await _seed_campaign(name="step8-source-count")
+    qid = await _seed_query(cid)
+
+    invite = "RecurringInvite99"
+    md = f"share: chat.whatsapp.com/{invite} — join the group"
+
+    urls = [
+        "https://reddit.com/r/x/post1",
+        "https://reddit.com/r/y/post2",
+        "https://blog.example.com/article",
+    ]
+
+    async with SessionLocal() as s:
+        for u in urls:
+            s.add(UrlCache(url=u, markdown=md))
+            s.add(
+                SearchResult(
+                    query_id=qid,
+                    url=u,
+                    status="fetched",
+                    fetch_strategy="reddit" if "reddit.com" in u else "web",
+                )
+            )
+        await s.commit()
+
+    # First extraction pass — should count 3 distinct URLs.
+    await extract_for_campaign(cid)
+
+    async with SessionLocal() as s:
+        lead = (
+            await s.execute(select(Lead).where(Lead.invite_id == invite))
+        ).scalar_one()
+        url_rows = list(
+            (
+                await s.execute(
+                    select(LeadSourceUrl.url).where(LeadSourceUrl.lead_id == lead.id)
+                )
+            ).scalars()
+        )
+
+    assert lead.source_count == 3, f"expected source_count=3, got {lead.source_count}"
+    assert set(url_rows) == set(urls), f"junction table mismatch: {url_rows}"
+
+    # Idempotent re-run — same rows already 'extracted', no new junction
+    # entries, source_count must stay at 3.
+    await extract_for_campaign(cid)
+    async with SessionLocal() as s:
+        lead = (
+            await s.execute(select(Lead).where(Lead.invite_id == invite))
+        ).scalar_one()
+    assert lead.source_count == 3, "re-run must not bump source_count"
+
+
+async def test_source_count_defaults_to_one_for_single_source():
+    """A vanilla single-URL discovery should land with source_count=1."""
+    cid = await _seed_campaign(name="step8-single-source")
+    qid = await _seed_query(cid)
+
+    async with SessionLocal() as s:
+        s.add(
+            SearchResult(
+                query_id=qid,
+                url="https://reddit.com/r/x/y",
+                snippet="see chat.whatsapp.com/SoloInvite12 here",
+                status="new",
+                fetch_strategy="snippet_hit",
+            )
+        )
+        await s.commit()
+
+    await extract_for_campaign(cid)
+
+    async with SessionLocal() as s:
+        lead = (
+            await s.execute(select(Lead).where(Lead.invite_id == "SoloInvite12"))
+        ).scalar_one()
+    assert lead.source_count == 1

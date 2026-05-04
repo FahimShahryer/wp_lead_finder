@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from src.db.models import Lead, Query, SearchResult, UrlCache
+from src.db.models import Lead, LeadSourceUrl, Query, SearchResult, UrlCache
 from src.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -63,6 +63,11 @@ async def _upsert_lead(
 
     `source_title` updates only when the new value is non-empty — re-discovery
     on a snippet-only row shouldn't blank out a previously-captured title.
+
+    Also records the (lead_id, source_url) pair in `lead_source_urls` so we
+    can count distinct sources later. Multiple SearchResult rows can share
+    the same URL (one per query that returned it); the junction's PK collapses
+    those duplicates so source_count reflects only unique URLs.
     """
     now = datetime.now(timezone.utc)
     async with SessionLocal() as s:
@@ -90,6 +95,30 @@ async def _upsert_lead(
             },
         )
         await s.execute(stmt)
+
+        # Look up the row we just upserted so we can record the source URL.
+        lead_id = await s.scalar(
+            select(Lead.id).where(
+                Lead.campaign_id == campaign_id,
+                Lead.invite_id == invite_id,
+            )
+        )
+
+        url_stmt = pg_insert(LeadSourceUrl).values(lead_id=lead_id, url=source_url)
+        url_stmt = url_stmt.on_conflict_do_nothing(index_elements=["lead_id", "url"])
+        url_result = await s.execute(url_stmt)
+        # Recompute source_count from the junction whenever a NEW pair landed.
+        # Doing it via a SELECT keeps the counter consistent even if rows get
+        # cleaned out separately later — denormalization tracking truth.
+        if url_result.rowcount and url_result.rowcount > 0:
+            new_count = await s.scalar(
+                select(func.count(LeadSourceUrl.lead_id)).where(
+                    LeadSourceUrl.lead_id == lead_id
+                )
+            )
+            await s.execute(
+                update(Lead).where(Lead.id == lead_id).values(source_count=new_count or 1)
+            )
         await s.commit()
     return existed is None
 

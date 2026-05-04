@@ -114,6 +114,15 @@ class Lead(Base):
     engagement: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_score: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
+    # Number of distinct source URLs that discovered this invite_id within
+    # this campaign. Bumped only when a NEW (lead_id, url) pair lands in
+    # `lead_source_urls`. Strong organic quality signal — invites recurring
+    # across many independent sources are far more likely to be real,
+    # active groups. Used as a small bonus on top of the LLM total_score.
+    source_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+
     # Persisted facts pulled live from WhatsApp's invite landing page during the
     # WA-enrichment stage. NULL until enrichment runs. After enrichment:
     #   verified_group_name IS NOT NULL  → invite is live and joinable
@@ -150,6 +159,28 @@ class Lead(Base):
 
     __table_args__ = (
         UniqueConstraint("campaign_id", "invite_id", name="uq_leads_campaign_invite"),
+    )
+
+
+class LeadSourceUrl(Base):
+    """Junction table — one row per (lead, source_url) pair. Lets us count
+    DISTINCT sources for an invite_id even when the same URL appears in
+    multiple SearchResult rows (because it was returned by multiple queries).
+
+    The extractor inserts with ON CONFLICT DO NOTHING; only genuinely-new
+    pairs trigger a `source_count` bump on the parent Lead row.
+    """
+
+    __tablename__ = "lead_source_urls"
+
+    lead_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("leads.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    first_seen: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
 
 

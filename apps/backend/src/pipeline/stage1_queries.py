@@ -33,7 +33,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.clients.openai_client import QUERY_GEN_MODEL, get_openai_client
-from src.db.models import Campaign, Query
+from src.db.models import Campaign, Lead, Query
+from src.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -381,3 +382,116 @@ async def generate_queries(session: AsyncSession, campaign: Campaign) -> list[Qu
         campaign.id, len(all_terms), len(platforms), len(rows),
     )
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Snowball search — recycle verified group names as new query seeds
+# ---------------------------------------------------------------------------
+
+
+# Cap on group-name length we'll accept as a query term. Names longer than
+# this won't fit cleanly in a quoted Google query alongside the anchor and
+# operators, and group names that are essentially sentences ("Welcome to our
+# AI agency owners networking community of founders…") tend to be SEO-junk
+# anyway and produce zero matching pages.
+MAX_GROUP_NAME_AS_TERM_LEN = 60
+
+# Default cap on snowball-spawned queries per call. Snowball is meant to
+# augment, not replace — keeps the budget impact bounded.
+SNOWBALL_DEFAULT_TARGET = 60
+
+
+async def snowball_from_verified_names(
+    campaign_id: int, top_n: int = 10, target_count: int = SNOWBALL_DEFAULT_TARGET
+) -> int:
+    """Take the top-N enriched leads (highest total_score, has
+    verified_group_name) and feed those names back into 1B as new term
+    seeds. Returns count of NEW queries inserted (deduped against existing).
+
+    Why this works: verified group names are the most ICP-specific phrases
+    we've ever seen for a campaign — much more specific than any LLM-
+    expanded variant. Quoting them in fresh queries finds the SAME group
+    on other pages (Reddit threads, blog posts) where it's mentioned, and
+    those pages frequently link to SISTER groups in the same niche. Pure
+    graph-walk into adjacent communities.
+
+    The campaign must be in a re-runnable state for the new queries to
+    actually get processed — caller is responsible for re-enqueuing
+    `run_campaign` after this returns.
+    """
+    async with SessionLocal() as s:
+        leads = list(
+            (
+                await s.execute(
+                    select(Lead)
+                    .where(
+                        Lead.campaign_id == campaign_id,
+                        Lead.verified_group_name.isnot(None),
+                        Lead.total_score.isnot(None),
+                    )
+                    .order_by(Lead.total_score.desc())
+                    .limit(top_n)
+                )
+            ).scalars()
+        )
+
+    if not leads:
+        logger.info("snowball: no enriched leads available for campaign %s", campaign_id)
+        return 0
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    for ld in leads:
+        name = (ld.verified_group_name or "").strip()
+        if not name or len(name) > MAX_GROUP_NAME_AS_TERM_LEN:
+            continue
+        # Strip embedded quotes — they'd break the outer quoting in 1B.
+        name = name.replace('"', "")
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        terms.append(name)
+
+    if not terms:
+        logger.info("snowball: no usable group names for campaign %s", campaign_id)
+        return 0
+
+    async with SessionLocal() as s:
+        campaign = await s.get(Campaign, campaign_id)
+        if campaign is None:
+            return 0
+        platforms = _resolve_query_platforms(campaign.platforms)
+        pairs = build_queries(terms, platforms, campaign.negative_locations, target_count)
+
+        existing_set = {
+            row[0]
+            for row in (
+                await s.execute(
+                    select(Query.query_text).where(Query.campaign_id == campaign_id)
+                )
+            ).all()
+        }
+        new_pairs = [(q, src) for q, src in pairs if q not in existing_set]
+
+        if not new_pairs:
+            logger.info("snowball: all %d candidate queries already exist", len(pairs))
+            return 0
+
+        rows = [
+            Query(
+                campaign_id=campaign_id,
+                query_text=q,
+                source_platform=src,
+                status="pending",
+            )
+            for q, src in new_pairs
+        ]
+        s.add_all(rows)
+        await s.commit()
+
+    logger.info(
+        "snowball: campaign %s seeded %d new queries from %d verified group names",
+        campaign_id, len(new_pairs), len(terms),
+    )
+    return len(new_pairs)

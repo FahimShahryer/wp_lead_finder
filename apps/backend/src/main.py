@@ -647,6 +647,88 @@ async def run_wa_enrichment(
     )
 
 
+class SnowballResponse(BaseModel):
+    new_queries: int
+    enqueued: bool
+
+
+class SubredditDiscoveryResponse(BaseModel):
+    subs_mined: int
+    new_search_results: int
+    skipped_existing: int
+    errors: int
+    enqueued: bool
+
+
+@app.post(
+    "/campaigns/{campaign_id}/discover-subreddits",
+    response_model=SubredditDiscoveryResponse,
+)
+async def run_subreddit_discovery(
+    campaign_id: int,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+):
+    """Identify subreddits that already produced ≥1 lead in this campaign,
+    then mine each one via Reddit's native search for additional invite-
+    bearing threads. New SearchResult rows land tagged `fetch_strategy=reddit`
+    `status=new` so the orchestrator's stage 4a picks them up on the next
+    run. If any new rows landed, the campaign is reopened and re-enqueued."""
+    from src.pipeline.subreddit_discovery import discover_via_productive_subreddits
+
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    counts = await discover_via_productive_subreddits(campaign_id)
+
+    enqueued = False
+    if counts["new_search_results"] > 0:
+        if c.status in ("done", "budget_exceeded"):
+            c.status = "running"
+            c.completed_at = None
+            await session.commit()
+        await request.app.state.arq_pool.enqueue_job("run_campaign", campaign_id)
+        enqueued = True
+
+    return SubredditDiscoveryResponse(**counts, enqueued=enqueued)
+
+
+@app.post("/campaigns/{campaign_id}/snowball", response_model=SnowballResponse)
+async def run_snowball(
+    campaign_id: int,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    top_n: int = 10,
+):
+    """Take the top-N enriched leads (highest total_score with a verified
+    group name) and feed those names back into the query generator as new
+    quoted-phrase seeds. The new queries land as `pending` in the queries
+    table; if any were added, we re-enqueue `run_campaign` so the orchestrator
+    picks them up and runs them through stages 2-6. The pipeline is
+    idempotent, so existing leads aren't reprocessed."""
+    from src.pipeline.stage1_queries import snowball_from_verified_names
+
+    c = await session.get(Campaign, campaign_id)
+    if c is None:
+        raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    new_queries = await snowball_from_verified_names(campaign_id, top_n=top_n)
+
+    enqueued = False
+    if new_queries > 0:
+        # Reopen the campaign if it had finished, then re-enqueue. The
+        # orchestrator's per-stage idempotency lets us replay safely.
+        if c.status in ("done", "budget_exceeded"):
+            c.status = "running"
+            c.completed_at = None
+            await session.commit()
+        await request.app.state.arq_pool.enqueue_job("run_campaign", campaign_id)
+        enqueued = True
+
+    return SnowballResponse(new_queries=new_queries, enqueued=enqueued)
+
+
 @app.post("/campaigns/{campaign_id}/auto-tag", response_model=AutoTagResponse)
 async def run_auto_tag(
     campaign_id: int,

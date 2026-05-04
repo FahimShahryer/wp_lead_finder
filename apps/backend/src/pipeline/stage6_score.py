@@ -129,12 +129,31 @@ def _build_user_msg(campaign: Campaign, leads: list[Lead]) -> str:
     )
 
 
-def _total(item: LeadScoreItem) -> int:
-    return round(
+# Source-recurrence bonus parameters. An invite that shows up in N distinct
+# source URLs within a single campaign is far more likely to be a real,
+# active group than a one-off mention. The bonus is bounded so it can lift a
+# good lead above ties but can't promote junk: a relevance=0 lead with 100
+# sources still has base ~0 and bonus 20 → total 20, well below any
+# legitimate fit. The sqrt curve gives diminishing returns past ~16 sources.
+SOURCE_BONUS_CAP = 20
+SOURCE_BONUS_COEF = 5  # bonus = SOURCE_BONUS_COEF * sqrt(source_count - 1), capped
+
+
+def _source_bonus(source_count: int | None) -> int:
+    """Return the additive bonus for `source_count` distinct source URLs.
+    1 source → 0; 2 → ~5; 5 → ~10; 17+ → 20."""
+    if not source_count or source_count <= 1:
+        return 0
+    return min(SOURCE_BONUS_CAP, round(SOURCE_BONUS_COEF * ((source_count - 1) ** 0.5)))
+
+
+def _total(item: LeadScoreItem, source_count: int = 1) -> int:
+    base = (
         item.relevance * W_RELEVANCE
         + item.geo_fit * W_GEO_FIT
         + item.engagement * W_ENGAGEMENT
     )
+    return min(100, round(base) + _source_bonus(source_count))
 
 
 async def _score_batch(campaign: Campaign, batch: list[Lead]) -> list[LeadScoreItem]:
@@ -189,7 +208,7 @@ async def _score_one_pass(campaign: Campaign, leads: list[Lead]) -> int:
                     relevance=item.relevance,
                     geo_fit=item.geo_fit,
                     engagement=item.engagement,
-                    total_score=_total(item),
+                    total_score=_total(item, ld.source_count or 1),
                     last_scored_at=now,
                 )
             )

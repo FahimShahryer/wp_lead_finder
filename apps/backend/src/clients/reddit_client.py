@@ -77,6 +77,49 @@ async def reddit_session():
         await reddit.close()
 
 
+async def search_subreddit(
+    reddit: asyncpraw.Reddit,
+    subreddit_name: str,
+    query: str,
+    limit: int = 25,
+) -> list:
+    """Search WITHIN a single subreddit via Reddit's native search. Returns a
+    list of Submission objects (already loaded enough to expose `.permalink`,
+    `.title`, `.id`).
+
+    Why this is a goldmine source: a subreddit that yielded one WhatsApp
+    invite via Google nearly always has many more in its history that
+    Google never surfaced (older threads, less SEO-optimized titles, etc.).
+    `subreddit.search("whatsapp")` walks through Reddit's own index — no
+    Serper credit, no Firecrawl credit, just an asyncpraw call.
+
+    Returns [] on per-sub failures (private, banned, deleted) so the caller
+    can skip the sub and continue. Raises RedditUnreachable if the API
+    itself becomes unreachable mid-call (caller already handles this in
+    higher-level discovery code).
+    """
+    try:
+        sub = await reddit.subreddit(subreddit_name)
+        # `search` returns an async iterator. We materialize into a list so
+        # callers can iterate it again / count it.
+        out: list = []
+        async for submission in sub.search(query, limit=limit):
+            out.append(submission)
+        return out
+    except (NotFound, Forbidden, Redirect):
+        # Sub is private, banned, or doesn't exist. Skip silently.
+        return []
+    except RequestException as e:
+        # Network-level: bubble up so the caller can stop the whole pass.
+        raise RedditUnreachable(
+            f"sub search network failure r/{subreddit_name}: {type(e).__name__}: {e}"
+        ) from e
+    except Exception as e:
+        # Defensive: any other failure is per-sub, treat as empty.
+        logger.warning("sub search failed r/%s: %s", subreddit_name, e)
+        return []
+
+
 async def fetch_submission_markdown(reddit: asyncpraw.Reddit, url: str) -> str:
     """Fetch a Reddit submission (or comment URL → submission), render it +
     top comments to markdown.
