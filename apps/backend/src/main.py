@@ -11,7 +11,7 @@ from arq.connections import RedisSettings
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,14 +106,27 @@ async def health():
 # ---------- Schemas ----------
 
 
+# Platforms that are still meaningful for query construction. Social platforms
+# (facebook/linkedin/twitter/x) were removed in the stage-1 rewrite — invites
+# don't live there per real-campaign data, and explicit `site:` queries against
+# them wasted ~25% of the Serper budget for ~0 yield. Anything not in this set
+# is silently dropped at ingestion.
+ALLOWED_PLATFORMS = {"reddit", "web", "meetup", "eventbrite"}
+
+
 class CreateCampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     industries: list[str] = Field(default_factory=list)
     locations: list[str] = Field(default_factory=list)
     negative_locations: list[str] = Field(default_factory=list)
-    platforms: list[str] = Field(default=["reddit", "web"])
+    platforms: list[str] = Field(default=["reddit", "web", "meetup", "eventbrite"])
     max_credits_serper: int = Field(default=500, ge=1)
     max_credits_firecrawl: int = Field(default=200, ge=1)
+
+    @field_validator("platforms")
+    @classmethod
+    def _drop_disallowed_platforms(cls, v: list[str]) -> list[str]:
+        return [p for p in (v or []) if p.lower().strip() in ALLOWED_PLATFORMS]
 
 
 class CreateCampaignResponse(BaseModel):

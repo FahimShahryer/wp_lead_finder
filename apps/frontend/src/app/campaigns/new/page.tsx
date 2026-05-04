@@ -10,19 +10,18 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
-// reddit + web are the core fetchable channels. meetup/eventbrite are public
-// and auto-route to web. facebook/linkedin/twitter/x are anti-scraped — for
-// those, stage 1 emits literal-phrase site: queries to harvest invite links
-// from Google's snippets without trying to fetch the pages.
+// Only platforms that actually yield WhatsApp invites. Social platforms
+// (facebook/linkedin/twitter/x) were removed after real-campaign data showed
+// they consume query budget for ~0 yield: invites mostly aren't there, and
+// the snippets get truncated before any link is visible. If a Facebook URL
+// happens to surface from a regular open-web search and its snippet contains
+// the invite, stage 3's snippet-hit path still extracts it for free — we just
+// don't pay Serper credits hunting for them.
 const PLATFORM_OPTIONS = [
   "reddit",
-  "web",
   "meetup",
   "eventbrite",
-  "facebook",
-  "linkedin",
-  "twitter",
-  "x",
+  "web",
 ] as const;
 
 function splitLines(s: string): string[] {
@@ -41,7 +40,12 @@ export default function NewCampaignPage() {
   const [industries, setIndustries] = useState("AI agency owners\nMarketing agency owners");
   const [locations, setLocations] = useState("US\nUK\nDubai");
   const [negativeLocations, setNegativeLocations] = useState("India\nIndian");
-  const [platforms, setPlatforms] = useState<string[]>(["reddit", "web"]);
+  const [platforms, setPlatforms] = useState<string[]>([
+    "reddit",
+    "meetup",
+    "eventbrite",
+    "web",
+  ]);
   const [maxSerper, setMaxSerper] = useState(50);
   const [maxFirecrawl, setMaxFirecrawl] = useState(30);
 
@@ -143,9 +147,10 @@ export default function NewCampaignPage() {
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">
-                reddit + web are core. meetup / eventbrite auto-route through Firecrawl.
-                facebook / linkedin / twitter / x are anti-scraped — stage 1 will hunt for
-                invite links in Google snippets only (no fetch attempted).
+                Reddit, Meetup, and Eventbrite each get targeted <code>site:</code> queries.
+                Web means broad open-web queries with no site constraint (catches blogs,
+                forums, newsletters). Social platforms (Facebook, LinkedIn, X) were removed
+                — real-campaign data showed they cost query budget for ~0 yield.
               </p>
             </div>
 
