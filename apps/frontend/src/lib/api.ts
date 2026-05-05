@@ -291,18 +291,28 @@ export const api = {
     return request<Lead[]>(`/campaigns/${id}/leads${qs ? `?${qs}` : ""}`);
   },
   listTags: (id: number) => request<Tag[]>(`/campaigns/${id}/tags`),
-  runAutoTag: (id: number, only_untagged = true) =>
-    request<AutoTagResult>(
-      `/campaigns/${id}/auto-tag?only_untagged=${only_untagged}`,
+  runAutoTag: (id: number, opts: { only_untagged?: boolean; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    params.set("only_untagged", String(opts.only_untagged ?? true));
+    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
+    return request<AutoTagResult>(
+      `/campaigns/${id}/auto-tag?${params.toString()}`,
       { method: "POST" },
-    ),
-  runWaEnrichment: (id: number, opts: { only_unvalidated?: boolean; request_budget?: number } = {}) => {
+    );
+  },
+  runWaEnrichment: (
+    id: number,
+    opts: { only_unvalidated?: boolean; request_budget?: number; limit?: number } = {},
+  ) => {
     const params = new URLSearchParams();
     if (opts.only_unvalidated !== undefined) {
       params.set("only_unvalidated", String(opts.only_unvalidated));
     }
     if (opts.request_budget !== undefined) {
       params.set("request_budget", String(opts.request_budget));
+    }
+    if (opts.limit !== undefined) {
+      params.set("limit", String(opts.limit));
     }
     const qs = params.toString();
     return request<EnrichmentResult>(

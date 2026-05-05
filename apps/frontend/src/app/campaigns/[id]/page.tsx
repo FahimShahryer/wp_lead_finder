@@ -159,8 +159,10 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
   const [pendingLeadId, setPendingLeadId] = useState<number | null>(null);
   const [autoTagBusy, setAutoTagBusy] = useState(false);
   const [autoTagMsg, setAutoTagMsg] = useState<string | null>(null);
+  const [autoTagLimit, setAutoTagLimit] = useState<number>(10);
   const [enrichBusy, setEnrichBusy] = useState(false);
   const [enrichMsg, setEnrichMsg] = useState<string | null>(null);
+  const [enrichLimit, setEnrichLimit] = useState<number>(10);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteMsg, setDeleteMsg] = useState<string | null>(null);
 
@@ -200,7 +202,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     setAutoTagBusy(true);
     setAutoTagMsg(null);
     try {
-      const res = await api.runAutoTag(cid, true);
+      const res = await api.runAutoTag(cid, { only_untagged: true, limit: autoTagLimit });
       const bucketNote =
         res.business_attached || res.business_detached || res.misc_attached || res.misc_detached
           ? ` · biz ±${res.business_attached}/-${res.business_detached} · misc ±${res.misc_attached}/-${res.misc_detached}`
@@ -243,7 +245,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     setEnrichBusy(true);
     setEnrichMsg(null);
     try {
-      const res = await api.runWaEnrichment(cid, { only_unvalidated: true });
+      const res = await api.runWaEnrichment(cid, { only_unvalidated: true, limit: enrichLimit });
       const transientNote =
         res.transient_errors > 0 ? ` · ${res.transient_errors} transient` : "";
       setEnrichMsg(
@@ -391,25 +393,65 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
             </div>
             <div className="flex flex-col items-end gap-2">
               <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={enrichBusy}
-                  onClick={runEnrichment}
-                  className="h-8"
-                  title="Hit WhatsApp's invite landing page for each lead and persist the verified group name"
-                >
-                  {enrichBusy ? "Enriching…" : "Enrich WhatsApp"}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={autoTagBusy}
-                  onClick={runAutoTag}
-                  className="h-8"
-                >
-                  {autoTagBusy ? "Tagging…" : "Run auto-tag"}
-                </Button>
+                <div className="flex items-center h-8 rounded-md border border-input bg-background overflow-hidden">
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={enrichLimit}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      // Clamp: 1..10. Anything else snaps to nearest valid.
+                      if (Number.isFinite(n)) {
+                        setEnrichLimit(Math.max(1, Math.min(10, Math.round(n))));
+                      }
+                    }}
+                    disabled={enrichBusy}
+                    aria-label="Number of leads to enrich (1-10)"
+                    title="Max leads per click (1-10)"
+                    className="h-full w-10 px-1 text-xs text-center bg-transparent outline-none border-r border-input"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={enrichBusy}
+                    onClick={runEnrichment}
+                    className="h-full rounded-none"
+                    title="Hit WhatsApp's invite landing page for the top N unvalidated leads and persist the verified group name"
+                  >
+                    {enrichBusy ? "Enriching…" : "Enrich WhatsApp"}
+                  </Button>
+                </div>
+                <div className="flex items-center h-8 rounded-md border border-input bg-background overflow-hidden">
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={autoTagLimit}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      if (Number.isFinite(n)) {
+                        setAutoTagLimit(Math.max(1, Math.min(10, Math.round(n))));
+                      }
+                    }}
+                    disabled={autoTagBusy}
+                    aria-label="Number of leads to auto-tag (1-10)"
+                    title="Max leads per click (1-10)"
+                    className="h-full w-10 px-1 text-xs text-center bg-transparent outline-none border-r border-input"
+                  />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={autoTagBusy}
+                    onClick={runAutoTag}
+                    className="h-full rounded-none"
+                    title="LLM-tag the top N untagged leads (highest score first)"
+                  >
+                    {autoTagBusy ? "Tagging…" : "Run auto-tag"}
+                  </Button>
+                </div>
                 <Button
                   size="sm"
                   variant="destructive"

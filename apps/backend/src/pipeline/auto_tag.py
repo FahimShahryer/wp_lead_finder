@@ -297,10 +297,22 @@ async def _refresh_managed_tags(
     return out
 
 
-async def auto_tag_campaign(campaign_id: int, only_untagged: bool = True) -> dict[str, int]:
+MAX_LEADS_PER_RUN = 10
+
+
+async def auto_tag_campaign(
+    campaign_id: int,
+    only_untagged: bool = True,
+    *,
+    limit: int = MAX_LEADS_PER_RUN,
+) -> dict[str, int]:
     """Run an LLM pass over the campaign's leads and assign 1-3 short tags per lead.
     Tags are persisted via tags + lead_tags. By default operates on leads that have
-    no tags yet; pass only_untagged=False to retag everything."""
+    no tags yet; pass only_untagged=False to retag everything. Processes at most
+    `limit` leads per call (1..10), highest total_score first — caps OpenAI spend
+    per click and lets the user inspect quality before tagging more."""
+    if not 1 <= limit <= MAX_LEADS_PER_RUN:
+        raise ValueError(f"limit must be between 1 and {MAX_LEADS_PER_RUN}, got {limit}")
     async with SessionLocal() as s:
         campaign = await s.get(Campaign, campaign_id)
         if campaign is None:
@@ -322,6 +334,9 @@ async def auto_tag_campaign(campaign_id: int, only_untagged: bool = True) -> dic
                 .scalar_subquery()
             )
             stmt = stmt.where(Lead.id.notin_(tagged_ids))
+        # Highest-scoring leads first; cap to limit so a click can't blow the
+        # OpenAI budget / hit rate-limits with a bulk run.
+        stmt = stmt.order_by(Lead.total_score.desc().nullslast()).limit(limit)
         leads = list((await s.execute(stmt)).scalars())
 
         existing = list(

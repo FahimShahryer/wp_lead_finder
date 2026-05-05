@@ -26,24 +26,34 @@ class EnrichmentCounts:
     transient_errors: int  # network blip — not persisted, retry next run
 
 
+MAX_LEADS_PER_RUN = 10
+
+
 async def enrich_campaign(
     campaign_id: int,
     redis: Redis,
     *,
     only_unvalidated: bool = True,
     request_budget: int = DEFAULT_REQUEST_BUDGET,
+    limit: int = MAX_LEADS_PER_RUN,
 ) -> EnrichmentCounts:
     """Hit WhatsApp's invite landing page for each lead, persist the verified
     group name + description (or mark dead-link). By default skips leads that
-    were already validated. May raise:
+    were already validated. Processes at most `limit` leads per call (1..10),
+    highest total_score first — to avoid burning WhatsApp request budget /
+    triggering rate-limits on a giant batch. May raise:
       - WhatsAppBlocked: Meta returned a CAPTCHA/challenge mid-batch. Caller
         should retry later (probably from a different IP).
       - WhatsAppBudgetExceeded: more leads than the per-run request budget.
     """
+    if not 1 <= limit <= MAX_LEADS_PER_RUN:
+        raise ValueError(f"limit must be between 1 and {MAX_LEADS_PER_RUN}, got {limit}")
     async with SessionLocal() as s:
         stmt = select(Lead).where(Lead.campaign_id == campaign_id)
         if only_unvalidated:
             stmt = stmt.where(Lead.last_validated_at.is_(None))
+        # Highest-value leads first; NULL scores last.
+        stmt = stmt.order_by(Lead.total_score.desc().nullslast()).limit(limit)
         leads = list((await s.execute(stmt)).scalars())
 
     if not leads:

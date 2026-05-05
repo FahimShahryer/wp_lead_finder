@@ -616,10 +616,12 @@ async def run_wa_enrichment(
     session: Annotated[AsyncSession, Depends(get_session)],
     only_unvalidated: bool = True,
     request_budget: int = DEFAULT_REQUEST_BUDGET,
+    limit: int = Query(10, ge=1, le=10, description="Max leads to enrich this call (1-10)"),
 ):
     """Hit WhatsApp's invite landing page for every lead in this campaign and
     persist the verified group name + description. Skips leads already
-    validated unless only_unvalidated=false. Returns 503 with a clear error
+    validated unless only_unvalidated=false. Processes at most `limit` leads
+    (1-10) per call, highest total_score first. Returns 503 with a clear error
     if Meta serves a CAPTCHA / challenge mid-batch (so we don't silently
     falsify good groups), or 400 if the run exceeds request_budget."""
     c = await session.get(Campaign, campaign_id)
@@ -631,6 +633,7 @@ async def run_wa_enrichment(
             request.app.state.redis,
             only_unvalidated=only_unvalidated,
             request_budget=request_budget,
+            limit=limit,
         )
     except WhatsAppBudgetExceeded as e:
         raise HTTPException(400, str(e))
@@ -734,13 +737,15 @@ async def run_auto_tag(
     campaign_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     only_untagged: bool = True,
+    limit: int = Query(10, ge=1, le=10, description="Max leads to tag this call (1-10)"),
 ):
     """LLM pass that assigns 1-3 short categorical tags per scored lead. By default
-    runs only on leads that have no tags yet; pass only_untagged=false to retag all."""
+    runs only on leads that have no tags yet; pass only_untagged=false to retag all.
+    Processes at most `limit` leads (1-10) per call, highest total_score first."""
     c = await session.get(Campaign, campaign_id)
     if c is None:
         raise HTTPException(404, f"campaign {campaign_id} not found")
-    counts = await auto_tag_campaign(campaign_id, only_untagged=only_untagged)
+    counts = await auto_tag_campaign(campaign_id, only_untagged=only_untagged, limit=limit)
     return AutoTagResponse(**counts)
 
 
