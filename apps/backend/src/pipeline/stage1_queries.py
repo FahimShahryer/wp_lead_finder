@@ -14,7 +14,7 @@ placement — it tries to be "creative" and ends up broad. So we split:
        producing queries with reliably-consistent operators. No LLM.
 
 Why this is better than a single big LLM call:
-  - Every query has the highest-precision operators (`"chat.whatsapp.com"`
+  - Every query has the highest-precision operators (chat.whatsapp.com
     anchor + quoted industry term + `site:` constraint + negatives).
   - No more "the LLM forgot to quote the term" or "the LLM dropped the anchor
     on this one query" failure modes.
@@ -57,12 +57,13 @@ PLATFORM_WEIGHTS: dict[str, float] = {
 }
 
 # Tier weights — fraction of total query budget allocated to each template.
-# T1 + T2 are the two snippet-hit paths: both carry the literal-phrase
-# `"chat.whatsapp.com"` anchor so Google returns pages with the invite link
-# directly visible in the snippet. We dropped a third tier (loose
-# whatsapp-keyword queries with no anchor) — it spent budget for ~0 yield
-# because pages without the anchor in the snippet require fetching, and the
-# keyword-stuffed queries narrow Google's index in the wrong dimension.
+# T1 + T2 are the two snippet-hit paths: both carry the chat.whatsapp.com
+# anchor (unquoted; Serper blocks the exact-phrase form) so Google leans
+# toward invite-bearing pages and the URL often appears in the snippet
+# verbatim. We dropped a third tier (loose whatsapp-keyword queries with no
+# anchor) — it spent budget for ~0 yield because pages without the anchor in
+# the snippet require fetching, and the keyword-stuffed queries narrow
+# Google's index in the wrong dimension.
 TIER_WEIGHTS: tuple[tuple[str, float], ...] = (
     ("T1", 0.65),  # precision: anchor + quoted term + site:
     ("T2", 0.35),  # broad-net snippet-hit: anchor + quoted term, no site:
@@ -203,14 +204,23 @@ def _format_negatives(neg_locations: list[str] | None) -> str:
 
 
 def _build_query_t1(term: str, platform: str, neg: str) -> str:
-    """T1: precision — anchor + quoted term + site:platform + negatives."""
-    base = f'"chat.whatsapp.com" "{term}" site:{platform}.com'
+    """T1: precision — anchor + quoted term + site:platform + negatives.
+
+    Anchor is unquoted: Serper rejects queries containing the exact-phrase
+    `"chat.whatsapp.com"` ({"message":"Query not allowed. Contact support."}).
+    Unquoted, the substring still pulls Google toward invite-bearing pages and
+    snippets often surface the full URL anyway.
+    """
+    base = f'chat.whatsapp.com "{term}" site:{platform}.com'
     return f"{base} {neg}".strip() if neg else base
 
 
 def _build_query_t2(term: str, neg: str) -> str:
-    """T2: broad-net snippet-hit — anchor + quoted term + negatives, no site:."""
-    base = f'"chat.whatsapp.com" "{term}"'
+    """T2: broad-net snippet-hit — anchor + quoted term + negatives, no site:.
+
+    See _build_query_t1 for why the anchor is unquoted.
+    """
+    base = f'chat.whatsapp.com "{term}"'
     return f"{base} {neg}".strip() if neg else base
 
 

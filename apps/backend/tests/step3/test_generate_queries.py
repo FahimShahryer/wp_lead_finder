@@ -45,9 +45,9 @@ def test_format_negatives_renders_clean_tokens():
 
 
 def test_build_queries_produces_anchor_on_t1_t2():
-    # Every query in T1 + T2 buckets MUST contain the literal-phrase anchor
-    # `"chat.whatsapp.com"`. T3 queries (looser) are 10% of the budget so up
-    # to ~10% of total queries may not have the anchor.
+    # Every query in T1 + T2 buckets MUST contain the chat.whatsapp.com anchor
+    # (unquoted — Serper blocks the exact-phrase form). T3 queries (looser) are
+    # 10% of the budget so up to ~10% of total queries may not have the anchor.
     pairs = build_queries(
         terms=["marketing agency", "agency owners", "agency founders"],
         platforms=["reddit", "meetup", "eventbrite"],
@@ -56,10 +56,14 @@ def test_build_queries_produces_anchor_on_t1_t2():
     )
     queries = [q for q, _ in pairs]
     assert len(queries) > 0
-    anchored = sum(1 for q in queries if '"chat.whatsapp.com"' in q)
+    anchored = sum(1 for q in queries if "chat.whatsapp.com" in q)
     # ≥ 70% should have the anchor (T1 55% + T2 35% = 90% target; allow slack).
     assert anchored / len(queries) >= 0.70, (
         f"only {anchored}/{len(queries)} queries had the chat.whatsapp.com anchor"
+    )
+    # And the anchor must NOT be wrapped in double quotes (Serper-side block).
+    assert not any('"chat.whatsapp.com"' in q for q in queries), (
+        "anchor must be unquoted to avoid Serper 'Query not allowed' rejection"
     )
 
 
@@ -169,8 +173,9 @@ async def test_generate_queries_for_real_icp():
         # Hard gate: enough queries to fill a campaign.
         assert len(rows) >= 20, f"expected >=20 queries, got {len(rows)}"
 
-        # Anchor: ≥70% of queries should carry the literal-phrase chat.whatsapp.com.
-        anchored = sum(1 for r in rows if '"chat.whatsapp.com"' in r.query_text)
+        # Anchor: ≥70% of queries should carry the chat.whatsapp.com anchor
+        # (unquoted — Serper blocks the exact-phrase form).
+        anchored = sum(1 for r in rows if "chat.whatsapp.com" in r.query_text)
         assert anchored / len(rows) >= 0.70, (
             f"only {anchored}/{len(rows)} queries had the anchor (need ≥70%)"
         )

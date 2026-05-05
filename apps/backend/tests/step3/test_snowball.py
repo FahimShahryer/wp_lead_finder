@@ -76,7 +76,8 @@ async def test_snowball_seeds_queries_from_verified_group_names():
     assert len(rows) == new_count
     queries = [r.query_text for r in rows]
     # Every snowball query must carry the chat.whatsapp.com anchor (T1+T2 only).
-    assert all('"chat.whatsapp.com"' in q for q in queries), queries
+    # Anchor is unquoted to avoid Serper's exact-phrase block.
+    assert all("chat.whatsapp.com" in q for q in queries), queries
     # At least one of each group name should appear quoted in the queries.
     assert any('"AI Marketing Agency Founders"' in q for q in queries)
     assert any('"Digital Agency Owners Network"' in q for q in queries)
