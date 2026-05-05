@@ -35,3 +35,7 @@ business_groups.csv
 apps/backend/ai_groups.csv
 apps/backend/business_groups.csv
 apps/backend/gen_csvs.py
+
+# Local pg_dump output from the db-backup sidecar — contains real lead data.
+backups/
+*.sql.gz

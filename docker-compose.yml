@@ -25,6 +25,28 @@ services:
       timeout: 3s
       retries: 10
 
+  # Daily pg_dump → ./backups/ on the host. Compressed, with rotation.
+  # Uses the same postgres image so pg_dump's version matches the server.
+  db-backup:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: app
+      PGPASSWORD: app
+      PGDATABASE: wp2
+      BACKUP_DIR: /backups
+      RETENTION_DAYS: "14"
+      # 86400s = 24h. Drop to 3600 to test the loop in real time.
+      INTERVAL_SECONDS: "86400"
+    volumes:
+      - ./backups:/backups
+      - ./scripts/db_backup.sh:/usr/local/bin/db_backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/db_backup.sh"]
+    restart: unless-stopped
+
   wa-sidecar:
     build:
       context: ./apps/wa-sidecar
