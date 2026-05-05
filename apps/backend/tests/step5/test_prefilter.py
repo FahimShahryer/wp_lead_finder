@@ -73,6 +73,42 @@ CASES = [
         "join us",
         "web",
     ),
+
+    # 23-30: WhatsApp directory aggregators must be skipped EVEN when the
+    # snippet contains an invite. These sites SEO-target our query shape and
+    # would otherwise pollute the lead lifecycle with auto-scraped junk.
+    (
+        "https://newwhatsgroups.com/marketing-groups",
+        "Top 50 marketing WhatsApp groups",
+        "join chat.whatsapp.com/AbcDef1234 here",
+        "skip",
+    ),
+    (
+        "https://whtspgrouplink.com/agency",
+        "Agency owners groups",
+        "see chat.whatsapp.com/XyzPqr5678 below",
+        "skip",
+    ),
+    (
+        "https://www.thewhatsgrouplink.com/2026/saas-groups",
+        "SaaS WhatsApp groups",
+        "no invite in snippet",
+        "skip",
+    ),
+    # Subdomain match
+    (
+        "https://m.joinchatgroups.com/cricket",
+        "x",
+        "y",
+        "skip",
+    ),
+    # Heavy listicle aggregator
+    ("https://whatsgroulinks.com/agency-owners", "x", "y", "skip"),
+    ("https://wagroupslink.com/marketing", "x", "y", "skip"),
+    ("https://wa-filter.com/finder", "x", "y", "skip"),
+    # Lookalike that's NOT in the blocklist — must classify as web, not skip.
+    # Defensive: confirms the blocklist is curated (not regex-pattern-based).
+    ("https://whatsapp-business.com/articles/foo", "x", "y", "web"),
 ]
 
 
@@ -84,6 +120,23 @@ def test_classify(url, title, snippet, expected):
 
 
 # ---------- Integration: real DB rows get tagged ----------
+
+def test_directory_blocklist_skips_even_when_invite_in_snippet():
+    """The directory check fires BEFORE the snippet_hit check on purpose:
+    these sites usually leak the invite into the snippet but the lead would
+    be auto-scraped junk. Snippet-hit should NOT win over directory-skip."""
+    from src.pipeline.stage3_prefilter import classify
+
+    # All these have a clear invite in the snippet — would normally be
+    # snippet_hit. Must still classify as skip.
+    cases = [
+        ("https://newwhatsgroups.com/x", "join chat.whatsapp.com/AbcDef1234 now"),
+        ("https://whatgroups.com/y", "see chat.whatsapp.com/XyzPqr5678 below"),
+        ("https://m.joinchatgroups.com/z", "chat.whatsapp.com/Hij1234567 link"),
+    ]
+    for url, snippet in cases:
+        assert classify(url, None, snippet) == "skip", url
+
 
 async def test_prefilter_tags_all_pending_rows_and_distribution_is_sane():
     async with SessionLocal() as s:

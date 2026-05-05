@@ -40,6 +40,35 @@ SKIP_HOST_SUFFIXES: tuple[str, ...] = (
     "media.giphy.com",
 )
 
+# Curated blocklist of WhatsApp invite-link aggregator / "directory" sites.
+# These pages SEO-target the exact `"chat.whatsapp.com" "<industry>"` query
+# shape we generate, then return 50-500 mostly-dead, mixed-category invites
+# per page — auto-scraped from elsewhere, not posted by real community owners.
+# Skipping them at the prefilter stage:
+#   - Drops noise leads BEFORE they enter the lead lifecycle
+#   - Saves Firecrawl credits we'd otherwise spend fetching giant listicles
+#   - Saves WA-enrichment requests on confirmed-dead invites
+#   - Prevents the source-recurrence bonus from being inflated by the same
+#     dead invite appearing on 5 different directories
+#
+# Conservative curated list — pattern-based heuristics risk false positives
+# (e.g. legitimate "whatsapp-business.com" Meta property). Add new ones as
+# they surface in real campaigns. Subdomain-aware (matches `foo.bar.com`).
+WA_DIRECTORY_DOMAINS: tuple[str, ...] = (
+    "newwhatsgroups.com",
+    "whatsgroupjoinlinks.com",
+    "wagroupslink.com",
+    "whatgroups.com",
+    "whatsgroulinks.com",
+    "whtspgrouplink.com",
+    "thewhatsgrouplink.com",
+    "wappgrouplinks.com",
+    "joinchatgroups.com",
+    "whtsgroupslinkspk.com",
+    "wa-filter.com",
+    "wa-contact-extractor.com",
+)
+
 SKIP_FILE_EXTS: tuple[str, ...] = (
     ".pdf",
     ".doc", ".docx",
@@ -79,23 +108,44 @@ def _is_skip_extension(url: str) -> bool:
     return any(path.endswith(ext) for ext in SKIP_FILE_EXTS)
 
 
+def _is_wa_directory(host: str) -> bool:
+    """True if the host matches a known WhatsApp invite aggregator. Subdomain-
+    aware: `m.whtspgrouplink.com` and `whtspgrouplink.com` both match."""
+    if not host:
+        return False
+    for suffix in WA_DIRECTORY_DOMAINS:
+        if host == suffix or host.endswith("." + suffix):
+            return True
+    return False
+
+
 def classify(url: str, title: str | None = None, snippet: str | None = None) -> FetchStrategy:
     """Pure classifier — no IO. Order matters:
       1) reddit if host is a reddit subdomain — even if an invite peeked into
          the snippet, the thread + comments often hold 10–30× more invites; we
          never short-circuit Reddit to snippet_hit. asyncpraw fetches are free,
          so the only cost is one extra API call that almost always pays for itself.
-      2) snippet_hit if the invite link is already visible (URL/title/snippet).
+      2) skip if the host is a known WhatsApp directory aggregator. Comes
+         BEFORE the snippet_hit check on purpose — these sites usually leak
+         the invite into the snippet, but the lead would be noise (auto-
+         scraped, mostly dead, mixed-category). Better to drop entirely than
+         pollute the lead lifecycle.
+      3) snippet_hit if the invite link is already visible (URL/title/snippet).
          Covers chat.whatsapp.com URLs themselves, hard-firewall sites where we
          can't fetch (facebook/linkedin/x), and small web pages where saving the
          Firecrawl credit is worth more than re-extracting from the full page.
-      3) skip for known-blocked hosts or file extensions.
-      4) web otherwise → Firecrawl.
+      4) skip for known-blocked hosts or file extensions.
+      5) web otherwise → Firecrawl.
     """
     host = _hostname(url)
 
     if _is_reddit(host):
         return "reddit"
+
+    # Directory aggregators — block BEFORE snippet_hit so we don't grab the
+    # noise invites these sites leak into Google's snippets.
+    if _is_wa_directory(host):
+        return "skip"
 
     haystacks = (url, title or "", snippet or "")
     if any(WHATSAPP_INVITE_RE.search(h) for h in haystacks):

@@ -29,9 +29,13 @@ SMALL_CAMPAIGN = {
     "industries": ["AI agency owners"],
     "locations": ["US", "UK"],
     "negative_locations": ["India"],
-    "platforms": ["reddit", "web"],
-    # Tight caps to keep the test cheap. Stage 1 alone produces 25-35 queries,
-    # but stage 2 will halt at the cap and stages 4a/4b at theirs.
+    # Match the new default platforms (post stage-1 rewrite). reddit / meetup /
+    # eventbrite each contribute their own site: queries; "web" is implicit
+    # (T2 has no site: constraint anyway).
+    "platforms": ["reddit", "meetup", "eventbrite", "web"],
+    # Tight caps to keep the test cheap. Stage 1B's cartesian product over
+    # ~6-10 LLM-expanded terms × 3 site:platforms × 2 templates produces
+    # 25-50 queries; stage 2 halts at the Serper cap, 4b at the Firecrawl cap.
     "max_credits_serper": 8,
     "max_credits_firecrawl": 5,
 }
