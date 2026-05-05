@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from src.db.models import Campaign, Lead, Query, SearchResult, UrlCache
 from src.db.session import SessionLocal
-from src.pipeline.stage5_extract import extract_for_campaign, extract_invites
+from src.pipeline.whatsapp.extract import extract_for_campaign, extract_invites
 
 
 # ---------- Pure regex / context tests ----------

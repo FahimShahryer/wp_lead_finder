@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from src.db.models import Campaign, Query, SearchResult
 from src.db.session import SessionLocal
-from src.pipeline.stage3_prefilter import classify, prefilter_search_results
+from src.pipeline.shared.prefilter import classify, prefilter_search_results
 
 # ---------- Pure classifier fixtures ----------
 
@@ -125,17 +125,60 @@ def test_directory_blocklist_skips_even_when_invite_in_snippet():
     """The directory check fires BEFORE the snippet_hit check on purpose:
     these sites usually leak the invite into the snippet but the lead would
     be auto-scraped junk. Snippet-hit should NOT win over directory-skip."""
-    from src.pipeline.stage3_prefilter import classify
+    from src.pipeline.shared.prefilter import classify
 
-    # All these have a clear invite in the snippet — would normally be
-    # snippet_hit. Must still classify as skip.
-    cases = [
+    # WhatsApp directory aggregators with WA invite in snippet → skip.
+    wa_cases = [
         ("https://newwhatsgroups.com/x", "join chat.whatsapp.com/AbcDef1234 now"),
         ("https://whatgroups.com/y", "see chat.whatsapp.com/XyzPqr5678 below"),
         ("https://m.joinchatgroups.com/z", "chat.whatsapp.com/Hij1234567 link"),
     ]
-    for url, snippet in cases:
+    for url, snippet in wa_cases:
         assert classify(url, None, snippet) == "skip", url
+
+    # Discord directory aggregators with Discord invite in snippet → skip.
+    discord_cases = [
+        ("https://disboard.org/server/123", "join discord.gg/SomeCode42 now"),
+        ("https://top.gg/servers/123", "see discord.gg/AbCdEf12 below"),
+        ("https://www.discadia.com/server/foo", "discord.gg/Hij123456 link"),
+        ("https://m.discord.me/server/foo", "discord.com/invite/ServerCode999 here"),
+    ]
+    for url, snippet in discord_cases:
+        assert classify(url, None, snippet) == "skip", url
+
+
+def test_snippet_hit_fires_for_discord_invite_in_snippet():
+    """A Reddit-or-blog page with a discord.gg link in the snippet should
+    classify as snippet_hit (not just web), regardless of the campaign's
+    target platform — the platform-specific extractor decides whether to
+    actually create a Lead row from it."""
+    from src.pipeline.shared.prefilter import classify
+
+    # Open-web page with Discord URL in snippet → snippet_hit.
+    assert classify(
+        "https://blog.example.com/communities",
+        title="Best AI communities",
+        snippet="Join our Discord: discord.gg/MyServer42 to start.",
+    ) == "snippet_hit"
+
+    # Canonical form
+    assert classify(
+        "https://forum.indiehackers.com/post/12",
+        title=None,
+        snippet="invite at https://discord.com/invite/IndieAgents88",
+    ) == "snippet_hit"
+
+
+def test_reddit_overrides_discord_snippet():
+    """Reddit URLs always classify as 'reddit' regardless of which platform's
+    invite leaked into the snippet — we always fetch the full thread."""
+    from src.pipeline.shared.prefilter import classify
+
+    assert classify(
+        "https://reddit.com/r/agency/comments/abc/title",
+        title="thread",
+        snippet="join discord.gg/SomeCode42 here",
+    ) == "reddit"
 
 
 async def test_prefilter_tags_all_pending_rows_and_distribution_is_sane():

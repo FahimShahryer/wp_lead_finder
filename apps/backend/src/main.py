@@ -35,13 +35,13 @@ from src.db.models import SearchResult
 from src.db.session import SessionLocal, engine, get_session
 from src.pipeline.auto_tag import auto_tag_campaign
 from src.pipeline.filter_by_prompt import filter_leads
-from src.pipeline.wa_enricher import (
+from src.pipeline.whatsapp.enricher import (
     EnrichmentCounts,
     WhatsAppBlocked,
     WhatsAppBudgetExceeded,
     enrich_campaign,
 )
-from src.pipeline.whatsapp_validator import DEFAULT_REQUEST_BUDGET
+from src.pipeline.whatsapp.validator import DEFAULT_REQUEST_BUDGET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("api")
@@ -113,6 +113,11 @@ async def health():
 # is silently dropped at ingestion.
 ALLOWED_PLATFORMS = {"reddit", "web", "meetup", "eventbrite"}
 
+# Per-campaign target platform — the invite-link ecosystem this campaign hunts
+# in. Each platform has its own orchestrator under `pipeline/<platform>/`. New
+# values land in this set when their orchestrator ships.
+ALLOWED_TARGET_PLATFORMS = {"whatsapp", "discord"}
+
 
 class CreateCampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -120,6 +125,10 @@ class CreateCampaignRequest(BaseModel):
     locations: list[str] = Field(default_factory=list)
     negative_locations: list[str] = Field(default_factory=list)
     platforms: list[str] = Field(default=["reddit", "web", "meetup", "eventbrite"])
+    # Which invite ecosystem to hunt in. Default 'whatsapp' for back-compat.
+    # The Literal widens here as new orchestrators ship — see the dispatcher
+    # in pipeline/run_campaign.py for the matching backend code.
+    platform: Literal["whatsapp", "discord"] = "whatsapp"
     max_credits_serper: int = Field(default=500, ge=1)
     max_credits_firecrawl: int = Field(default=200, ge=1)
 
@@ -139,6 +148,7 @@ class CampaignSummary(BaseModel):
     name: str
     status: str
     current_stage: str | None
+    platform: str
     leads_count: int
     scored_leads_count: int
     serper_credits_used: int
@@ -165,6 +175,7 @@ class CampaignStatusResponse(BaseModel):
     locations: list[str]
     negative_locations: list[str]
     platforms: list[str]
+    platform: str
     serper_credits_used: int
     max_credits_serper: int
     firecrawl_credits_used: int
@@ -293,6 +304,7 @@ async def list_campaigns(
             name=c.name,
             status=c.status,
             current_stage=c.current_stage,
+            platform=c.platform,
             leads_count=lc,
             scored_leads_count=sc,
             serper_credits_used=c.serper_credits_used,
@@ -315,6 +327,7 @@ async def create_campaign(
         locations=req.locations,
         negative_locations=req.negative_locations,
         platforms=req.platforms,
+        platform=req.platform,
         max_credits_serper=req.max_credits_serper,
         max_credits_firecrawl=req.max_credits_firecrawl,
     )
@@ -361,6 +374,7 @@ async def get_campaign(
         locations=c.locations,
         negative_locations=c.negative_locations,
         platforms=c.platforms,
+        platform=c.platform,
         serper_credits_used=c.serper_credits_used,
         max_credits_serper=c.max_credits_serper,
         firecrawl_credits_used=c.firecrawl_credits_used,
@@ -610,7 +624,7 @@ class EnrichmentResponse(BaseModel):
 
 
 @app.post("/campaigns/{campaign_id}/enrich-whatsapp", response_model=EnrichmentResponse)
-async def run_wa_enrichment(
+async def run_enrichment(
     campaign_id: int,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -618,15 +632,45 @@ async def run_wa_enrichment(
     request_budget: int = DEFAULT_REQUEST_BUDGET,
     limit: int = Query(10, ge=1, le=10, description="Max leads to enrich this call (1-10)"),
 ):
-    """Hit WhatsApp's invite landing page for every lead in this campaign and
-    persist the verified group name + description. Skips leads already
-    validated unless only_unvalidated=false. Processes at most `limit` leads
-    (1-10) per call, highest total_score first. Returns 503 with a clear error
-    if Meta serves a CAPTCHA / challenge mid-batch (so we don't silently
-    falsify good groups), or 400 if the run exceeds request_budget."""
+    """Validate the top-N leads against the campaign's platform and persist
+    verified group/server name + description. Dispatches by `campaign.platform`:
+      - whatsapp → hits Meta's invite landing page (rate-limited, may CAPTCHA)
+      - discord  → hits Discord's public invite API (no auth, fast)
+
+    URL kept as `/enrich-whatsapp` for back-compat with the existing frontend
+    button; the path is misleading now but renaming would break in-flight
+    deployments. Body shape is identical across platforms.
+
+    Returns 503 if WA serves a CAPTCHA mid-batch, 400 if the run exceeds
+    request_budget.
+    """
     c = await session.get(Campaign, campaign_id)
     if c is None:
         raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    if c.platform == "discord":
+        from src.pipeline.discord.enricher import (
+            DiscordBudgetExceeded,
+            enrich_campaign as enrich_discord,
+        )
+        try:
+            counts = await enrich_discord(
+                campaign_id,
+                only_unvalidated=only_unvalidated,
+                request_budget=request_budget,
+                limit=limit,
+            )
+        except DiscordBudgetExceeded as e:
+            raise HTTPException(400, str(e))
+        return EnrichmentResponse(
+            considered=counts.considered,
+            fetched=counts.fetched,
+            valid=counts.valid,
+            invalid=counts.invalid,
+            transient_errors=counts.transient_errors,
+        )
+
+    # Default: WhatsApp.
     try:
         counts: EnrichmentCounts = await enrich_campaign(
             campaign_id,
@@ -677,7 +721,7 @@ async def run_subreddit_discovery(
     bearing threads. New SearchResult rows land tagged `fetch_strategy=reddit`
     `status=new` so the orchestrator's stage 4a picks them up on the next
     run. If any new rows landed, the campaign is reopened and re-enqueued."""
-    from src.pipeline.subreddit_discovery import discover_via_productive_subreddits
+    from src.pipeline.shared.subreddit_discovery import discover_via_productive_subreddits
 
     c = await session.get(Campaign, campaign_id)
     if c is None:
@@ -705,16 +749,22 @@ async def run_snowball(
     top_n: int = 10,
 ):
     """Take the top-N enriched leads (highest total_score with a verified
-    group name) and feed those names back into the query generator as new
-    quoted-phrase seeds. The new queries land as `pending` in the queries
-    table; if any were added, we re-enqueue `run_campaign` so the orchestrator
-    picks them up and runs them through stages 2-6. The pipeline is
-    idempotent, so existing leads aren't reprocessed."""
-    from src.pipeline.stage1_queries import snowball_from_verified_names
+    group/server name) and feed those names back into the query generator as
+    new quoted-phrase seeds. The new queries land as `pending`; if any were
+    added, we re-enqueue `run_campaign` so the orchestrator picks them up.
+    The pipeline is idempotent, so existing leads aren't reprocessed.
 
+    Dispatches to the campaign's platform: WhatsApp uses chat.whatsapp.com
+    anchors, Discord uses discord.gg anchors. Both go through the same
+    1B combinator under the hood."""
     c = await session.get(Campaign, campaign_id)
     if c is None:
         raise HTTPException(404, f"campaign {campaign_id} not found")
+
+    if c.platform == "discord":
+        from src.pipeline.discord.queries import snowball_from_verified_names
+    else:
+        from src.pipeline.whatsapp.queries import snowball_from_verified_names
 
     new_queries = await snowball_from_verified_names(campaign_id, top_n=top_n)
 

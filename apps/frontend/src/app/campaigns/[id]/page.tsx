@@ -44,10 +44,22 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/status-badge";
+import { PlatformBadge } from "@/components/platform-badge";
 import { CategorizePanel } from "@/components/categorize-panel";
 import { ExportPanel } from "@/components/export-panel";
 
 const TERMINAL = new Set(["done", "budget_exceeded", "failed"]);
+
+
+// Map an invite_id back to the canonical join URL for its platform. Used for
+// the "open invite" link on each lead row. Discord codes go through the
+// shorter discord.gg form (also accepted by Discord's clients).
+function inviteUrl(platform: string, inviteId: string): string {
+  if (platform === "discord") {
+    return `https://discord.gg/${inviteId}`;
+  }
+  return `https://chat.whatsapp.com/${inviteId}`;
+}
 
 function StatStat({
   label,
@@ -283,9 +295,10 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
             <ArrowLeft className="mr-1 inline h-3 w-3" />
             All campaigns
           </Link>
-          <h1 className="mt-1 flex items-center gap-3 text-2xl font-semibold tracking-tight">
+          <h1 className="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold tracking-tight">
             {campaign.name}
             <span className="text-base font-normal text-muted-foreground">#{campaign.id}</span>
+            <PlatformBadge platform={campaign.platform} />
             <StatusBadge status={campaign.status} stage={campaign.current_stage} />
           </h1>
           <p className="text-sm text-muted-foreground">
@@ -418,9 +431,17 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                     disabled={enrichBusy}
                     onClick={runEnrichment}
                     className="h-full rounded-none"
-                    title="Hit WhatsApp's invite landing page for the top N unvalidated leads and persist the verified group name"
+                    title={
+                      campaign.platform === "discord"
+                        ? "Hit Discord's public invite API for the top N unvalidated leads and persist the verified server name"
+                        : "Hit WhatsApp's invite landing page for the top N unvalidated leads and persist the verified group name"
+                    }
                   >
-                    {enrichBusy ? "Enriching…" : "Enrich WhatsApp"}
+                    {enrichBusy
+                      ? "Validating…"
+                      : campaign.platform === "discord"
+                        ? "Validate via Discord"
+                        : "Enrich WhatsApp"}
                   </Button>
                 </div>
                 <div className="flex items-center h-8 rounded-md border border-input bg-background overflow-hidden">
@@ -614,7 +635,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                     <TableCell>
                       <div className="flex items-center gap-1.5">
                         <a
-                          href={`https://chat.whatsapp.com/${l.invite_id}`}
+                          href={inviteUrl(campaign.platform, l.invite_id)}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center gap-1 hover:underline text-sm font-medium max-w-[240px] truncate"

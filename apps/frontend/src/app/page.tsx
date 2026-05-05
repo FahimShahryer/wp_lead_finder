@@ -15,6 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { PlatformBadge } from "@/components/platform-badge";
 import { NumbersCard } from "@/components/numbers-card";
 
 export default function DashboardPage() {
@@ -53,7 +54,8 @@ export default function DashboardPage() {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[40%]">Name</TableHead>
+              <TableHead className="w-[36%]">Name</TableHead>
+              <TableHead>Platform</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Leads</TableHead>
               <TableHead className="text-right">Scored</TableHead>
@@ -66,14 +68,14 @@ export default function DashboardPage() {
           <TableBody>
             {isLoading && (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground">
+                <TableCell colSpan={9} className="text-center text-muted-foreground">
                   Loading…
                 </TableCell>
               </TableRow>
             )}
             {data && data.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-muted-foreground py-8">
+                <TableCell colSpan={9} className="text-center text-muted-foreground py-8">
                   No campaigns yet.{" "}
                   <Link href="/campaigns/new" className="underline">
                     Create your first one.
@@ -88,6 +90,9 @@ export default function DashboardPage() {
                     {c.name}
                   </Link>
                   <div className="text-xs text-muted-foreground">#{c.id}</div>
+                </TableCell>
+                <TableCell>
+                  <PlatformBadge platform={c.platform} />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status={c.status} stage={c.current_stage} />

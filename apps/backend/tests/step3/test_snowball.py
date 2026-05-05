@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from src.db.models import Campaign, Lead, Query
 from src.db.session import SessionLocal
-from src.pipeline.stage1_queries import snowball_from_verified_names
+from src.pipeline.whatsapp.queries import snowball_from_verified_names
 
 
 async def _seed_campaign_with_enriched_leads(

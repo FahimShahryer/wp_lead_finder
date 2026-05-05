@@ -9,7 +9,7 @@ import pytest
 
 from src.db.models import Campaign, Lead
 from src.db.session import SessionLocal
-from src.pipeline.subreddit_discovery import (
+from src.pipeline.shared.subreddit_discovery import (
     _build_search_query,
     _extract_subreddit_from_url,
     _productive_subs,
@@ -109,7 +109,7 @@ async def test_productive_subs_ignores_campaigns_with_no_reddit_leads():
 async def test_productive_subs_respects_max_per_pass():
     """When N subs each have ≥1 lead, we still cap the returned list at
     MAX_SUBS_PER_PASS. Only the top-N by lead count come back."""
-    from src.pipeline.subreddit_discovery import MAX_SUBS_PER_PASS
+    from src.pipeline.shared.subreddit_discovery import MAX_SUBS_PER_PASS
 
     # Build a campaign with leads in MAX+5 distinct subs, with different
     # counts so ordering is unambiguous.

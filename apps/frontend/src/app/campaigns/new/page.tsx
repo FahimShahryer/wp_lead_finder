@@ -46,6 +46,9 @@ export default function NewCampaignPage() {
     "eventbrite",
     "web",
   ]);
+  // Which invite ecosystem this campaign hunts in. Each platform has its own
+  // pipeline (queries, extract, validator) under apps/backend/src/pipeline/<p>/.
+  const [platform, setPlatform] = useState<"whatsapp" | "discord">("whatsapp");
   const [maxSerper, setMaxSerper] = useState(50);
   const [maxFirecrawl, setMaxFirecrawl] = useState(30);
 
@@ -64,6 +67,7 @@ export default function NewCampaignPage() {
         locations: splitLines(locations),
         negative_locations: splitLines(negativeLocations),
         platforms,
+        platform,
         max_credits_serper: maxSerper,
         max_credits_firecrawl: maxFirecrawl,
       });
@@ -98,6 +102,35 @@ export default function NewCampaignPage() {
                 placeholder="e.g. Q2 AI agency owners — US/UK"
                 required
               />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Run campaign for</Label>
+              <div className="flex gap-2">
+                {(["whatsapp", "discord"] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => setPlatform(p)}
+                    className={
+                      "flex-1 rounded-md border px-3 py-2 text-sm font-medium transition " +
+                      (platform === p
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-input bg-background hover:bg-accent")
+                    }
+                  >
+                    {p === "whatsapp" ? "WhatsApp" : "Discord"}
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Each platform has its own pipeline — queries are anchored on{" "}
+                <code>{platform === "whatsapp" ? "chat.whatsapp.com" : "discord.gg"}</code>,
+                and validation hits the{" "}
+                {platform === "whatsapp"
+                  ? "WhatsApp invite landing page (rate-limited, CAPTCHA-prone)"
+                  : "Discord public API (no auth, fast)"}.
+              </p>
             </div>
 
             <div className="space-y-2">

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from src.clients.reddit_client import RedditUnreachable, reddit_session
 from src.db.models import Campaign, Query, SearchResult, UrlCache
 from src.db.session import SessionLocal
-from src.pipeline.stage4a_reddit import fetch_pending_reddit
+from src.pipeline.shared.reddit_fetch import fetch_pending_reddit
 
 # Live Reddit test — gated on creds present in container env.
 pytestmark = pytest.mark.skipif(

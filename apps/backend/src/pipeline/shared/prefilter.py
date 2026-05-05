@@ -20,6 +20,28 @@ WHATSAPP_INVITE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detects whether ANY discord invite link is present. Three URL forms get
+# matched: discord.gg/<code>, discord.com/invite/<code>, discordapp.com/
+# invite/<code>. Codes are alnum + hyphen, 3-32 chars (Discord's vanity-code
+# range; standard codes are 6-10). Must be present in the snippet for
+# snippet_hit to fire on Discord-targeted campaigns.
+DISCORD_INVITE_RE = re.compile(
+    r"(?:discord\.gg|discord(?:app)?\.com/invite)/"
+    r"[A-Za-z0-9-]{3,32}(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+
+# Combined invite detector — matches ANY supported platform's invite link.
+# Used by the prefilter to decide "snippet_hit" without needing to know which
+# platform the campaign is hunting for. The platform-specific extract stage
+# (whatsapp/extract.py, discord/extract.py) is where invite_ids actually get
+# pulled out, so a Discord URL leaking into a WhatsApp campaign's snippet
+# fires snippet_hit but produces no Lead row (and vice versa).
+ANY_INVITE_RE = re.compile(
+    rf"(?:{WHATSAPP_INVITE_RE.pattern})|(?:{DISCORD_INVITE_RE.pattern})",
+    re.IGNORECASE,
+)
+
 # Domains we don't try to fetch — either anti-scraping (LinkedIn, Twitter),
 # media-only (YouTube), or low-yield for invite links.
 SKIP_HOST_SUFFIXES: tuple[str, ...] = (
@@ -69,6 +91,24 @@ WA_DIRECTORY_DOMAINS: tuple[str, ...] = (
     "wa-contact-extractor.com",
 )
 
+# Discord-side equivalent — public listing/aggregator sites that index
+# Discord invite links across every category. Same playbook as the WA
+# directories: SEO-targeted, mostly-stale invites, mixed-niche pages,
+# auto-scraped. Block them up-front so a Discord campaign doesn't drown
+# in disboard.org listicle hits.
+DISCORD_DIRECTORY_DOMAINS: tuple[str, ...] = (
+    "disboard.org",
+    "discord.me",
+    "discadia.com",
+    "discords.com",
+    "discordlist.gg",
+    "discordhome.com",
+    "top.gg",  # primarily bots, but lists invites; mostly noise
+    "discordservers.com",
+    "discordbee.com",
+    "disforge.com",
+)
+
 SKIP_FILE_EXTS: tuple[str, ...] = (
     ".pdf",
     ".doc", ".docx",
@@ -108,15 +148,31 @@ def _is_skip_extension(url: str) -> bool:
     return any(path.endswith(ext) for ext in SKIP_FILE_EXTS)
 
 
-def _is_wa_directory(host: str) -> bool:
-    """True if the host matches a known WhatsApp invite aggregator. Subdomain-
-    aware: `m.whtspgrouplink.com` and `whtspgrouplink.com` both match."""
+def _host_matches_any(host: str, suffixes: tuple[str, ...]) -> bool:
+    """Subdomain-aware host membership check. `m.foo.com` matches `foo.com`."""
     if not host:
         return False
-    for suffix in WA_DIRECTORY_DOMAINS:
+    for suffix in suffixes:
         if host == suffix or host.endswith("." + suffix):
             return True
     return False
+
+
+def _is_wa_directory(host: str) -> bool:
+    """True if the host matches a known WhatsApp invite aggregator."""
+    return _host_matches_any(host, WA_DIRECTORY_DOMAINS)
+
+
+def _is_discord_directory(host: str) -> bool:
+    """True if the host matches a known Discord invite aggregator."""
+    return _host_matches_any(host, DISCORD_DIRECTORY_DOMAINS)
+
+
+def _is_invite_directory(host: str) -> bool:
+    """True if the host is in any platform's directory blocklist. Combined
+    so the prefilter (which doesn't know which platform a campaign is hunting
+    for) can drop both kinds in one check."""
+    return _is_wa_directory(host) or _is_discord_directory(host)
 
 
 def classify(url: str, title: str | None = None, snippet: str | None = None) -> FetchStrategy:
@@ -142,13 +198,17 @@ def classify(url: str, title: str | None = None, snippet: str | None = None) -> 
     if _is_reddit(host):
         return "reddit"
 
-    # Directory aggregators — block BEFORE snippet_hit so we don't grab the
-    # noise invites these sites leak into Google's snippets.
-    if _is_wa_directory(host):
+    # Directory aggregators (WhatsApp + Discord) — block BEFORE snippet_hit so
+    # we don't grab the noise invites these sites leak into Google's snippets.
+    if _is_invite_directory(host):
         return "skip"
 
+    # Snippet check uses ANY_INVITE_RE so a Discord URL leaking into a
+    # WhatsApp campaign's snippet (or vice versa) still fires snippet_hit.
+    # The platform-specific extract stage filters by its own regex, so an
+    # off-platform invite won't actually become a Lead row.
     haystacks = (url, title or "", snippet or "")
-    if any(WHATSAPP_INVITE_RE.search(h) for h in haystacks):
+    if any(ANY_INVITE_RE.search(h) for h in haystacks):
         return "snippet_hit"
 
     if _is_skip_host(host) or _is_skip_extension(url):

@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, update
 
 from src.db.models import Lead, LeadTag
 from src.db.session import SessionLocal
-from src.pipeline.whatsapp_validator import (
+from src.pipeline.whatsapp.validator import (
     DEFAULT_REQUEST_BUDGET,
     WhatsAppBlocked,
     WhatsAppBudgetExceeded,

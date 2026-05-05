@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 
 from src.db.models import Campaign, Query, SearchResult
 from src.db.session import SessionLocal
-from src.pipeline.stage2_search import search_pending_queries
+from src.pipeline.shared.serper_search import search_pending_queries
 
 # Live Serper test — gated on the key being injected into the api container.
 pytestmark = pytest.mark.skipif(

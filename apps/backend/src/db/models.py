@@ -20,6 +20,19 @@ class Campaign(Base):
     negative_locations: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
     platforms: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
 
+    # Which platform's invite links this campaign hunts for. Single-platform-
+    # per-campaign by design: WhatsApp / Discord / Slack each have their own
+    # query anchor, extract regex, and validator — modeling them as separate
+    # campaigns keeps the pipeline auditable and isolates per-platform issues
+    # from each other. Default 'whatsapp' for back-compat with legacy rows.
+    platform: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="whatsapp",
+        server_default="whatsapp",
+        index=True,
+    )
+
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
     # Set by the orchestrator before each stage runs ('queries' / 'search' / 'prefilter' /
     # 'fetch_reddit' / 'fetch_web' / 'extract' / 'score'); cleared when terminal.

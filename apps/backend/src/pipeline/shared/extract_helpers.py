@@ -1,6 +1,23 @@
+"""Generic stage-5 helpers used by every platform's extractor.
+
+Each platform's `extract.py` only needs to define:
+  - an `_INVITE_RE` for its invite-link shape
+  - a small `extract_invites(text)` function that returns
+    [(invite_id, ±200char context), ...]
+
+…and then call `run_extract_for_campaign(campaign_id, extract_invites)` to
+get all the boilerplate (search_result iteration, cache lookup, lead upsert,
+source-URL junction maintenance, `source_count` recompute).
+
+Lives in `shared/` because none of this logic is platform-specific. The
+only platform input is the regex closure passed in — same Lead table,
+same junction, same status transitions.
+"""
+from __future__ import annotations
+
 import logging
-import re
 from datetime import datetime, timezone
+from typing import Awaitable, Callable
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -10,43 +27,11 @@ from src.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-# `(?<![a-zA-Z0-9])` — must not be preceded by a letter/digit.
-# This rejects "subchat.whatsapp.com/X" (preceded by 'b') while accepting
-# "https://chat.whatsapp.com/X" (preceded by '/').
-#
-# `{6,30}` — invite_id length bound. Real WhatsApp invite_ids are 22 chars
-# (post-2018 format); the `{6,30}` band keeps a safety buffer for any future
-# format change while rejecting trivial false-positive matches like
-# `chat.whatsapp.com/x` or `chat.whatsapp.com/abc` that occur in commentary,
-# truncated URLs, or partial scrapes. The trailing `(?![A-Za-z0-9_-])` guard
-# stops the regex consuming only the FIRST 30 chars of a longer junk string —
-# without it, a 50-char malformed id would match as the first 30 of those.
-_INVITE_RE = re.compile(
-    r"(?<![a-zA-Z0-9])chat\.whatsapp\.com/([A-Za-z0-9_-]{6,30})(?![A-Za-z0-9_-])",
-    re.IGNORECASE,
-)
-CONTEXT_WINDOW = 200
+
+ExtractFn = Callable[[str | None], list[tuple[str, str]]]
 
 
-def extract_invites(text: str | None) -> list[tuple[str, str]]:
-    """Return a list of (invite_id, ±200-char context) for every invite link in text.
-    Dedupes within the same text (one occurrence per invite_id, keeping first context)."""
-    if not text:
-        return []
-    seen: set[str] = set()
-    out: list[tuple[str, str]] = []
-    for m in _INVITE_RE.finditer(text):
-        invite_id = m.group(1)
-        if invite_id in seen:
-            continue
-        seen.add(invite_id)
-        ctx_start = max(0, m.start() - CONTEXT_WINDOW)
-        ctx_end = min(len(text), m.end() + CONTEXT_WINDOW)
-        out.append((invite_id, text[ctx_start:ctx_end]))
-    return out
-
-
-async def _upsert_lead(
+async def upsert_lead(
     invite_id: str,
     source_url: str,
     source_title: str | None,
@@ -96,7 +81,6 @@ async def _upsert_lead(
         )
         await s.execute(stmt)
 
-        # Look up the row we just upserted so we can record the source URL.
         lead_id = await s.scalar(
             select(Lead.id).where(
                 Lead.campaign_id == campaign_id,
@@ -107,9 +91,6 @@ async def _upsert_lead(
         url_stmt = pg_insert(LeadSourceUrl).values(lead_id=lead_id, url=source_url)
         url_stmt = url_stmt.on_conflict_do_nothing(index_elements=["lead_id", "url"])
         url_result = await s.execute(url_stmt)
-        # Recompute source_count from the junction whenever a NEW pair landed.
-        # Doing it via a SELECT keeps the counter consistent even if rows get
-        # cleaned out separately later — denormalization tracking truth.
         if url_result.rowcount and url_result.rowcount > 0:
             new_count = await s.scalar(
                 select(func.count(LeadSourceUrl.lead_id)).where(
@@ -123,20 +104,33 @@ async def _upsert_lead(
     return existed is None
 
 
-async def _set_status(sr_id: int, status: str) -> None:
+async def mark_search_result_extracted(sr_id: int) -> None:
     async with SessionLocal() as s:
-        await s.execute(update(SearchResult).where(SearchResult.id == sr_id).values(status=status))
+        await s.execute(
+            update(SearchResult).where(SearchResult.id == sr_id).values(status="extracted")
+        )
         await s.commit()
 
 
-async def extract_for_campaign(campaign_id: int) -> dict[str, int]:
-    """Stage 5: scan every extractable search_result, pull invite_ids, UPSERT leads.
+async def run_extract_for_campaign(
+    campaign_id: int,
+    extract_invites: ExtractFn,
+) -> dict[str, int]:
+    """Stage 5: scan every extractable search_result, pull invite_ids using the
+    platform's `extract_invites` callable, UPSERT leads.
 
     Picks up:
       - fetch_strategy='snippet_hit' AND status='new'  (no fetch was needed)
       - fetch_strategy in ('reddit','web') AND status='fetched'
 
     Idempotent: rows already 'extracted' are skipped.
+
+    The `extract_invites` callable is the platform's contribution — it
+    receives the raw text and returns [(invite_id, context), ...]. Anything
+    that returns an empty list on a platform-mismatched URL (e.g. running
+    the WA extractor on a Discord-only thread) gets recorded as no_invite,
+    which is the desired behavior — cross-platform leakage doesn't pollute
+    leads.
     """
     counts = {"new_leads": 0, "updated_leads": 0, "extracted_rows": 0, "no_invite": 0}
 
@@ -165,33 +159,33 @@ async def extract_for_campaign(campaign_id: int) -> dict[str, int]:
         ).all()
 
     if not rows:
-        logger.info("stage 5: no extractable rows for campaign %s", campaign_id)
+        logger.info("extract: no extractable rows for campaign %s", campaign_id)
         return counts
 
-    for sr_id, url, title, snippet, strategy, status in rows:
+    for sr_id, url, title, snippet, strategy, _status in rows:
         if strategy == "snippet_hit":
             text = "\n".join(filter(None, [url, title, snippet]))
         else:
             async with SessionLocal() as s:
                 cached = await s.get(UrlCache, url)
             if cached is None:
-                logger.warning("stage 5: cache miss for fetched sr=%d url=%s", sr_id, url)
-                await _set_status(sr_id, "extracted")
+                logger.warning("extract: cache miss for fetched sr=%d url=%s", sr_id, url)
+                await mark_search_result_extracted(sr_id)
                 continue
             text = cached.markdown
 
         invites = extract_invites(text)
         if not invites:
             counts["no_invite"] += 1
-            await _set_status(sr_id, "extracted")
+            await mark_search_result_extracted(sr_id)
             continue
 
         for invite_id, context in invites:
-            is_new = await _upsert_lead(invite_id, url, title, context, campaign_id)
+            is_new = await upsert_lead(invite_id, url, title, context, campaign_id)
             counts["new_leads" if is_new else "updated_leads"] += 1
 
         counts["extracted_rows"] += 1
-        await _set_status(sr_id, "extracted")
+        await mark_search_result_extracted(sr_id)
 
-    logger.info("stage 5 done for campaign %s: %s", campaign_id, counts)
+    logger.info("extract done for campaign %s: %s", campaign_id, counts)
     return counts

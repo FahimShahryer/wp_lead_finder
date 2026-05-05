@@ -10,13 +10,13 @@ import pytest
 
 from src.db.models import Campaign
 from src.db.session import SessionLocal
-from src.pipeline.stage1_queries import (
+from src.pipeline.shared.query_builders import (
     ALLOWED_QUERY_PLATFORMS,
     _format_negatives,
     _resolve_query_platforms,
     build_queries,
-    generate_queries,
 )
+from src.pipeline.whatsapp.queries import generate_queries
 
 
 # ---------- Pure unit tests for stage 1B (no API keys required) ----------
@@ -53,6 +53,7 @@ def test_build_queries_produces_anchor_on_t1_t2():
         platforms=["reddit", "meetup", "eventbrite"],
         negatives=["india", "indian"],
         target_count=30,
+        anchor="chat.whatsapp.com",
     )
     queries = [q for q, _ in pairs]
     assert len(queries) > 0
@@ -73,6 +74,7 @@ def test_build_queries_quotes_industry_terms():
         platforms=["reddit"],
         negatives=[],
         target_count=10,
+        anchor="chat.whatsapp.com",
     )
     # Every query MUST quote the term — `"marketing agency"` not `marketing agency`.
     for q, _ in pairs:
@@ -85,6 +87,7 @@ def test_build_queries_applies_negatives_consistently():
         platforms=["reddit", "meetup"],
         negatives=["india", "indian"],
         target_count=20,
+        anchor="chat.whatsapp.com",
     )
     # Every query should include both negatives.
     for q, _ in pairs:
@@ -98,6 +101,7 @@ def test_build_queries_dedupes_near_misses():
         platforms=["reddit"],
         negatives=[],
         target_count=20,
+        anchor="chat.whatsapp.com",
     )
     # Dedup uses sorted-token normalization, so word-order swaps collapse.
     queries = [q for q, _ in pairs]
@@ -110,6 +114,7 @@ def test_build_queries_caps_to_target_count():
         platforms=["reddit", "meetup", "eventbrite"],
         negatives=[],
         target_count=5,
+        anchor="chat.whatsapp.com",
     )
     assert len(pairs) <= 5
 
@@ -121,6 +126,7 @@ def test_build_queries_under_200_chars():
         platforms=["reddit", "meetup", "eventbrite"],
         negatives=["india", "indian", "pakistan"],
         target_count=20,
+        anchor="chat.whatsapp.com",
     )
     for q, _ in pairs:
         assert len(q) <= 200, f"query too long ({len(q)} chars): {q}"
@@ -132,6 +138,7 @@ def test_build_queries_marks_reddit_source_correctly():
         platforms=["reddit", "meetup"],
         negatives=[],
         target_count=20,
+        anchor="chat.whatsapp.com",
     )
     # Any query containing site:reddit.com must have source_platform='reddit'.
     for q, src in pairs:

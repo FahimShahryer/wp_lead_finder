@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from src.db.models import Campaign, Lead
 from src.db.session import SessionLocal
-from src.pipeline.stage6_score import score_for_campaign
+from src.pipeline.shared.score import score_for_campaign
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("OPENAI_API_KEY"),
@@ -174,7 +174,7 @@ async def test_scoring_is_idempotent_on_rerun():
 
 def test_source_bonus_curve():
     """Source-recurrence bonus shape: 1 → 0, sqrt curve, capped at 20."""
-    from src.pipeline.stage6_score import _source_bonus
+    from src.pipeline.shared.score import _source_bonus
 
     # 1 source = baseline, no boost.
     assert _source_bonus(1) == 0
@@ -194,7 +194,7 @@ def test_source_bonus_curve():
 def test_total_score_applies_source_bonus_and_caps_at_100():
     """_total combines the LLM-weighted score and the source-recurrence bonus,
     clipping to 100 so a near-max lead with many sources doesn't overflow."""
-    from src.pipeline.stage6_score import LeadScoreItem, _total
+    from src.pipeline.shared.score import LeadScoreItem, _total
 
     item = LeadScoreItem(invite_id="x", relevance=80, geo_fit=80, engagement=80)
     # base = 0.5*80 + 0.3*80 + 0.2*80 = 80

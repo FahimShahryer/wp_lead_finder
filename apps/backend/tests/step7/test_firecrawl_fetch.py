@@ -5,7 +5,7 @@ import pytest
 
 from src.db.models import Campaign, Query, SearchResult, UrlCache
 from src.db.session import SessionLocal
-from src.pipeline.stage4b_firecrawl import fetch_pending_firecrawl
+from src.pipeline.shared.firecrawl_fetch import fetch_pending_firecrawl
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("FIRECRAWL_API_KEY"),
