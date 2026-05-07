@@ -119,6 +119,15 @@ ALLOWED_PLATFORMS = {"reddit", "web", "meetup", "eventbrite"}
 ALLOWED_TARGET_PLATFORMS = {"whatsapp", "discord"}
 
 
+def invite_url_for(platform: str, invite_id: str) -> str:
+    """Map a Lead's invite_id back to its canonical join URL. Used by every
+    surface that emits a join link (CSV export today; analytics endpoints
+    later). Centralized so adding a new platform is one line here."""
+    if platform == "discord":
+        return f"https://discord.gg/{invite_id}"
+    return f"https://chat.whatsapp.com/{invite_id}"
+
+
 class CreateCampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     industries: list[str] = Field(default_factory=list)
@@ -584,7 +593,7 @@ async def export_leads_csv(
     w.writerow([
         "rank", "group_name", "group_description", "status", "tags", "total_score",
         "relevance", "geo_fit", "engagement",
-        "whatsapp_link", "source_url", "invite_valid",
+        "invite_link", "source_url", "invite_valid",
     ])
     for i, ld in enumerate(leads, 1):
         if ld.last_validated_at is None:
@@ -603,7 +612,7 @@ async def export_leads_csv(
             ld.relevance if ld.relevance is not None else "",
             ld.geo_fit if ld.geo_fit is not None else "",
             ld.engagement if ld.engagement is not None else "",
-            f"https://chat.whatsapp.com/{ld.invite_id}",
+            invite_url_for(c.platform, ld.invite_id),
             ld.source_url or "",
             invite_status,
         ])

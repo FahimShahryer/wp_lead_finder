@@ -26,6 +26,7 @@ import {
   api,
   fetcher,
 } from "@/lib/api";
+import { inviteUrl } from "@/lib/invite-url";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -49,17 +50,6 @@ import { CategorizePanel } from "@/components/categorize-panel";
 import { ExportPanel } from "@/components/export-panel";
 
 const TERMINAL = new Set(["done", "budget_exceeded", "failed"]);
-
-
-// Map an invite_id back to the canonical join URL for its platform. Used for
-// the "open invite" link on each lead row. Discord codes go through the
-// shorter discord.gg form (also accepted by Discord's clients).
-function inviteUrl(platform: string, inviteId: string): string {
-  if (platform === "discord") {
-    return `https://discord.gg/${inviteId}`;
-  }
-  return `https://chat.whatsapp.com/${inviteId}`;
-}
 
 function StatStat({
   label,
@@ -340,7 +330,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         </CardContent>
       </Card>
 
-      <CategorizePanel campaignId={cid} />
+      <CategorizePanel campaignId={cid} platform={campaign.platform} />
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>

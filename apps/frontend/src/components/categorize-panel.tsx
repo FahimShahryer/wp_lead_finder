@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Download, Loader2, Sparkles, Trash2, X } from "lucide-react";
 
 import { FilteredLead, LEAD_STATUSES, LeadStatus, api } from "@/lib/api";
+import { inviteUrl } from "@/lib/invite-url";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -47,7 +48,7 @@ function csvEscape(v: string | number | null | undefined): string {
   return s;
 }
 
-function buildCsv(category: SavedCategory): string {
+function buildCsv(category: SavedCategory, platform: string): string {
   const header = [
     "rank",
     "group_name",
@@ -55,7 +56,7 @@ function buildCsv(category: SavedCategory): string {
     "relevance",
     "geo_fit",
     "engagement",
-    "whatsapp_link",
+    "invite_link",
     "source_url",
     "reason",
   ];
@@ -66,7 +67,7 @@ function buildCsv(category: SavedCategory): string {
     l.relevance ?? "",
     l.geo_fit ?? "",
     l.engagement ?? "",
-    `https://chat.whatsapp.com/${l.invite_id}`,
+    inviteUrl(platform, l.invite_id),
     l.source_url ?? "",
     l.reason,
   ]);
@@ -75,8 +76,8 @@ function buildCsv(category: SavedCategory): string {
     .join("\n");
 }
 
-function downloadCsv(category: SavedCategory) {
-  const csv = buildCsv(category);
+function downloadCsv(category: SavedCategory, platform: string) {
+  const csv = buildCsv(category, platform);
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
   const safe = category.name.replace(/[^a-z0-9-_]+/gi, "_").toLowerCase() || "category";
   const url = URL.createObjectURL(blob);
@@ -92,7 +93,15 @@ function downloadCsv(category: SavedCategory) {
 type Scope = LeadStatus | "all";
 const SCOPE_OPTIONS: Scope[] = ["pending", "approved", "joined", ...LEAD_STATUSES.filter(s => !["pending","approved","joined"].includes(s)), "all"];
 
-export function CategorizePanel({ campaignId }: { campaignId: number }) {
+export function CategorizePanel({
+  campaignId,
+  platform,
+}: {
+  campaignId: number;
+  // Which platform's pipeline this campaign hunts in. Drives the invite-URL
+  // pattern in the result list and the downloadable CSV.
+  platform: "whatsapp" | "discord" | string;
+}) {
   const [prompt, setPrompt] = useState("");
   const [scope, setScope] = useState<Scope>("pending");
   const [loading, setLoading] = useState(false);
@@ -269,7 +278,7 @@ export function CategorizePanel({ campaignId }: { campaignId: number }) {
                           <td className="px-2 py-1.5 tabular-nums">{l.total_score ?? "—"}</td>
                           <td className="px-2 py-1.5">
                             <a
-                              href={`https://chat.whatsapp.com/${l.invite_id}`}
+                              href={inviteUrl(platform, l.invite_id)}
                               target="_blank"
                               rel="noreferrer"
                               className="hover:underline font-medium"
@@ -320,7 +329,7 @@ export function CategorizePanel({ campaignId }: { campaignId: number }) {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => downloadCsv(c)}
+                      onClick={() => downloadCsv(c, platform)}
                       disabled={c.leads.length === 0}
                     >
                       <Download className="mr-1 h-3.5 w-3.5" />
