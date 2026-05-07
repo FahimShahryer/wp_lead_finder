@@ -48,7 +48,9 @@ export default function NewCampaignPage() {
   ]);
   // Which invite ecosystem this campaign hunts in. Each platform has its own
   // pipeline (queries, extract, validator) under apps/backend/src/pipeline/<p>/.
-  const [platform, setPlatform] = useState<"whatsapp" | "discord">("whatsapp");
+  const [platform, setPlatform] = useState<"whatsapp" | "discord" | "slack">(
+    "whatsapp",
+  );
   const [maxSerper, setMaxSerper] = useState(50);
   const [maxFirecrawl, setMaxFirecrawl] = useState(30);
 
@@ -107,7 +109,7 @@ export default function NewCampaignPage() {
             <div className="space-y-2">
               <Label>Run campaign for</Label>
               <div className="flex gap-2">
-                {(["whatsapp", "discord"] as const).map((p) => (
+                {(["whatsapp", "discord", "slack"] as const).map((p) => (
                   <button
                     key={p}
                     type="button"
@@ -119,17 +121,30 @@ export default function NewCampaignPage() {
                         : "border-input bg-background hover:bg-accent")
                     }
                   >
-                    {p === "whatsapp" ? "WhatsApp" : "Discord"}
+                    {p === "whatsapp"
+                      ? "WhatsApp"
+                      : p === "discord"
+                        ? "Discord"
+                        : "Slack"}
                   </button>
                 ))}
               </div>
               <p className="text-xs text-muted-foreground">
                 Each platform has its own pipeline — queries are anchored on{" "}
-                <code>{platform === "whatsapp" ? "chat.whatsapp.com" : "discord.gg"}</code>,
-                and validation hits the{" "}
+                <code>
+                  {platform === "whatsapp"
+                    ? "chat.whatsapp.com"
+                    : platform === "discord"
+                      ? "discord.gg"
+                      : "join.slack.com"}
+                </code>
+                , and validation hits the{" "}
                 {platform === "whatsapp"
                   ? "WhatsApp invite landing page (rate-limited, CAPTCHA-prone)"
-                  : "Discord public API (no auth, fast)"}.
+                  : platform === "discord"
+                    ? "Discord public API (no auth, fast)"
+                    : "Slack public landing page (no API; tokens auto-expire ~30 days, so enrich soon)"}
+                .
               </p>
             </div>
 

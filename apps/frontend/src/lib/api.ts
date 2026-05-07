@@ -8,7 +8,7 @@ export type CampaignSummary = {
   name: string;
   status: string;
   current_stage: string | null;
-  platform: "whatsapp" | "discord";
+  platform: "whatsapp" | "discord" | "slack";
   leads_count: number;
   scored_leads_count: number;
   serper_credits_used: number;
@@ -26,7 +26,7 @@ export type CampaignStatus = {
   locations: string[];
   negative_locations: string[];
   platforms: string[];
-  platform: "whatsapp" | "discord";
+  platform: "whatsapp" | "discord" | "slack";
   serper_credits_used: number;
   max_credits_serper: number;
   firecrawl_credits_used: number;
@@ -243,7 +243,7 @@ export type CreateCampaignRequest = {
   negative_locations: string[];
   platforms: string[];
   // Which invite ecosystem to hunt in. Each maps to its own backend pipeline.
-  platform: "whatsapp" | "discord";
+  platform: "whatsapp" | "discord" | "slack";
   max_credits_serper: number;
   max_credits_firecrawl: number;
 };

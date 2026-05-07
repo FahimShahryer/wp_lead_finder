@@ -110,7 +110,9 @@ class Lead(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     # Same invite_id may appear under multiple campaigns — each run analyses
     # it fresh. Uniqueness is per-campaign (see __table_args__ below).
-    invite_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # 128 chars accommodates Slack's `<workspace>/<token>` invite identity
+    # (typically 50-80 chars). WhatsApp (22) and Discord (≤32) fit well within.
+    invite_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
 
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     # SERP/page title for source_url, captured at extraction time. Strongest

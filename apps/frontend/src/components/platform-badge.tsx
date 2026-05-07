@@ -15,6 +15,11 @@ const STYLES: Record<string, { label: string; className: string }> = {
     className:
       "bg-indigo-100 text-indigo-900 hover:bg-indigo-100 border-indigo-200",
   },
+  slack: {
+    label: "Slack",
+    className:
+      "bg-purple-100 text-purple-900 hover:bg-purple-100 border-purple-200",
+  },
 };
 
 export function PlatformBadge({

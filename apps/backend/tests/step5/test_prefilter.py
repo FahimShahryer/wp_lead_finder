@@ -146,6 +146,19 @@ def test_directory_blocklist_skips_even_when_invite_in_snippet():
     for url, snippet in discord_cases:
         assert classify(url, None, snippet) == "skip", url
 
+    # Slack directory aggregators with Slack invite in snippet → skip.
+    slack_cases = [
+        (
+            "https://slofile.com/marketing-pros",
+            "join.slack.com/t/marketing-pros/shared_invite/zt-abc-XYZ12345",
+        ),
+        ("https://slacklist.com/saas", "https://join.slack.com/t/saas/shared_invite/zt-foo-AAA1234567"),
+        ("https://m.getslack.com/communities", "x"),
+        ("https://www.slacks.io/marketing", "y"),
+    ]
+    for url, snippet in slack_cases:
+        assert classify(url, None, snippet) == "skip", url
+
 
 def test_snippet_hit_fires_for_discord_invite_in_snippet():
     """A Reddit-or-blog page with a discord.gg link in the snippet should
@@ -166,6 +179,25 @@ def test_snippet_hit_fires_for_discord_invite_in_snippet():
         "https://forum.indiehackers.com/post/12",
         title=None,
         snippet="invite at https://discord.com/invite/IndieAgents88",
+    ) == "snippet_hit"
+
+
+def test_snippet_hit_fires_for_slack_invite_in_snippet():
+    """Same logic for Slack — a join.slack.com URL in a SERP snippet should
+    fire snippet_hit on any campaign so the Slack extractor can pull it later."""
+    from src.pipeline.shared.prefilter import classify
+
+    assert classify(
+        "https://blog.example.com/communities",
+        title="Best B2B communities",
+        snippet="Join the Slack: https://join.slack.com/t/marketing-pros/shared_invite/zt-abc-XYZ",
+    ) == "snippet_hit"
+
+    # On Indie Hackers (open web)
+    assert classify(
+        "https://www.indiehackers.com/post/launch-day",
+        title="We launched today",
+        snippet="join.slack.com/t/launch-club/shared_invite/zt-foo-bar123",
     ) == "snippet_hit"
 
 

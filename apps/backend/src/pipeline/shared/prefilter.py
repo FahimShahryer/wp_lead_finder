@@ -31,14 +31,45 @@ DISCORD_INVITE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Detects Slack shared-invite URLs. Modern form (2020+):
+#   https://join.slack.com/t/<workspace>/shared_invite/<token>
+# - workspace: alnum + hyphen, 3-30 chars (Slack's URL-slug rules)
+# - token: starts with `zt-` typically, alnum + hyphens, ~20-40 chars in
+#   practice. We cap at 80 for forward-compat with longer tokens.
+#
+# `(?<![a-zA-Z0-9])` rejects lookalike prefixes like "myjoin.slack.com/t/".
+# `(?![A-Za-z0-9_-])` after the token stops over-long junk from being
+# consumed as a single match.
+#
+# Stores group(1) = workspace, group(2) = token. Stage 5's extract function
+# combines them as `<workspace>/<token>` so the lead's invite_id is unique
+# and the URL is reconstructible by the validator.
+SLACK_INVITE_RE = re.compile(
+    r"(?<![a-zA-Z0-9])"
+    r"join\.slack\.com/t/([a-z0-9-]{3,30})/shared_invite/([A-Za-z0-9-]{10,80})"
+    r"(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+
+# A lighter "did the SERP snippet leak any slack URL substring at all" check,
+# used by ANY_INVITE_RE for snippet_hit routing. We don't need to capture
+# workspace+token here — that's the platform-specific extract stage's job.
+SLACK_INVITE_SUBSTRING_RE = re.compile(
+    r"(?<![a-zA-Z0-9])join\.slack\.com/t/",
+    re.IGNORECASE,
+)
+
 # Combined invite detector — matches ANY supported platform's invite link.
 # Used by the prefilter to decide "snippet_hit" without needing to know which
 # platform the campaign is hunting for. The platform-specific extract stage
-# (whatsapp/extract.py, discord/extract.py) is where invite_ids actually get
-# pulled out, so a Discord URL leaking into a WhatsApp campaign's snippet
-# fires snippet_hit but produces no Lead row (and vice versa).
+# (whatsapp/extract.py, discord/extract.py, slack/extract.py) is where
+# invite_ids actually get pulled out, so a Discord URL leaking into a Slack
+# campaign's snippet fires snippet_hit but produces no Lead row (and so on
+# across every cross-platform combination).
 ANY_INVITE_RE = re.compile(
-    rf"(?:{WHATSAPP_INVITE_RE.pattern})|(?:{DISCORD_INVITE_RE.pattern})",
+    rf"(?:{WHATSAPP_INVITE_RE.pattern})"
+    rf"|(?:{DISCORD_INVITE_RE.pattern})"
+    rf"|(?:{SLACK_INVITE_SUBSTRING_RE.pattern})",
     re.IGNORECASE,
 )
 
@@ -109,6 +140,22 @@ DISCORD_DIRECTORY_DOMAINS: tuple[str, ...] = (
     "disforge.com",
 )
 
+# Slack directory aggregators. Smaller and more curated than Discord
+# directories, but the same problem applies — invites get scraped and
+# indexed but most are stale (Slack invites expire in 30 days by default,
+# directories don't refresh that fast). Block at the prefilter so a Slack
+# campaign doesn't waste credits fetching listicles.
+SLACK_DIRECTORY_DOMAINS: tuple[str, ...] = (
+    "slofile.com",
+    "slacklist.com",
+    "slacks.io",
+    "getslack.com",
+    "slackcommunities.org",
+    "slack-list.com",
+    "slacklists.com",
+    "slackify.app",
+)
+
 SKIP_FILE_EXTS: tuple[str, ...] = (
     ".pdf",
     ".doc", ".docx",
@@ -168,11 +215,20 @@ def _is_discord_directory(host: str) -> bool:
     return _host_matches_any(host, DISCORD_DIRECTORY_DOMAINS)
 
 
+def _is_slack_directory(host: str) -> bool:
+    """True if the host matches a known Slack invite aggregator."""
+    return _host_matches_any(host, SLACK_DIRECTORY_DOMAINS)
+
+
 def _is_invite_directory(host: str) -> bool:
     """True if the host is in any platform's directory blocklist. Combined
     so the prefilter (which doesn't know which platform a campaign is hunting
-    for) can drop both kinds in one check."""
-    return _is_wa_directory(host) or _is_discord_directory(host)
+    for) can drop directories from any platform in one check."""
+    return (
+        _is_wa_directory(host)
+        or _is_discord_directory(host)
+        or _is_slack_directory(host)
+    )
 
 
 def classify(url: str, title: str | None = None, snippet: str | None = None) -> FetchStrategy:

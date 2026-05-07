@@ -34,9 +34,14 @@ async def run_campaign(campaign_id: int) -> None:
         await run_discord_campaign(campaign_id)
         return
 
-    # Slack and any future platforms land here. Until then, an explicit error
-    # is more debuggable than a silent skip.
+    if platform == "slack":
+        from src.pipeline.slack.orchestrator import run_slack_campaign
+        await run_slack_campaign(campaign_id)
+        return
+
+    # Future platforms land here. Until then, an explicit error is more
+    # debuggable than a silent skip.
     raise ValueError(
         f"campaign {campaign_id}: no orchestrator registered for "
-        f"platform={platform!r} (known: 'whatsapp', 'discord')"
+        f"platform={platform!r} (known: 'whatsapp', 'discord', 'slack')"
     )

@@ -424,14 +424,18 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                     title={
                       campaign.platform === "discord"
                         ? "Hit Discord's public invite API for the top N unvalidated leads and persist the verified server name"
-                        : "Hit WhatsApp's invite landing page for the top N unvalidated leads and persist the verified group name"
+                        : campaign.platform === "slack"
+                          ? "Fetch each Slack invite's public landing page for the top N unvalidated leads. Tokens auto-expire ~30 days, so a high dead rate is normal."
+                          : "Hit WhatsApp's invite landing page for the top N unvalidated leads and persist the verified group name"
                     }
                   >
                     {enrichBusy
                       ? "Validating…"
                       : campaign.platform === "discord"
                         ? "Validate via Discord"
-                        : "Enrich WhatsApp"}
+                        : campaign.platform === "slack"
+                          ? "Validate Slack invites"
+                          : "Enrich WhatsApp"}
                   </Button>
                 </div>
                 <div className="flex items-center h-8 rounded-md border border-input bg-background overflow-hidden">

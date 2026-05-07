@@ -116,7 +116,7 @@ ALLOWED_PLATFORMS = {"reddit", "web", "meetup", "eventbrite"}
 # Per-campaign target platform — the invite-link ecosystem this campaign hunts
 # in. Each platform has its own orchestrator under `pipeline/<platform>/`. New
 # values land in this set when their orchestrator ships.
-ALLOWED_TARGET_PLATFORMS = {"whatsapp", "discord"}
+ALLOWED_TARGET_PLATFORMS = {"whatsapp", "discord", "slack"}
 
 
 def invite_url_for(platform: str, invite_id: str) -> str:
@@ -125,6 +125,10 @@ def invite_url_for(platform: str, invite_id: str) -> str:
     later). Centralized so adding a new platform is one line here."""
     if platform == "discord":
         return f"https://discord.gg/{invite_id}"
+    if platform == "slack":
+        # Slack invite_ids are stored as `<workspace>/<token>` — slot both
+        # halves into the canonical join URL.
+        return f"https://join.slack.com/t/{invite_id.replace('/', '/shared_invite/', 1)}"
     return f"https://chat.whatsapp.com/{invite_id}"
 
 
@@ -137,7 +141,7 @@ class CreateCampaignRequest(BaseModel):
     # Which invite ecosystem to hunt in. Default 'whatsapp' for back-compat.
     # The Literal widens here as new orchestrators ship — see the dispatcher
     # in pipeline/run_campaign.py for the matching backend code.
-    platform: Literal["whatsapp", "discord"] = "whatsapp"
+    platform: Literal["whatsapp", "discord", "slack"] = "whatsapp"
     max_credits_serper: int = Field(default=500, ge=1)
     max_credits_firecrawl: int = Field(default=200, ge=1)
 
@@ -679,6 +683,28 @@ async def run_enrichment(
             transient_errors=counts.transient_errors,
         )
 
+    if c.platform == "slack":
+        from src.pipeline.slack.enricher import (
+            SlackBudgetExceeded,
+            enrich_campaign as enrich_slack,
+        )
+        try:
+            counts = await enrich_slack(
+                campaign_id,
+                only_unvalidated=only_unvalidated,
+                request_budget=request_budget,
+                limit=limit,
+            )
+        except SlackBudgetExceeded as e:
+            raise HTTPException(400, str(e))
+        return EnrichmentResponse(
+            considered=counts.considered,
+            fetched=counts.fetched,
+            valid=counts.valid,
+            invalid=counts.invalid,
+            transient_errors=counts.transient_errors,
+        )
+
     # Default: WhatsApp.
     try:
         counts: EnrichmentCounts = await enrich_campaign(
@@ -772,6 +798,8 @@ async def run_snowball(
 
     if c.platform == "discord":
         from src.pipeline.discord.queries import snowball_from_verified_names
+    elif c.platform == "slack":
+        from src.pipeline.slack.queries import snowball_from_verified_names
     else:
         from src.pipeline.whatsapp.queries import snowball_from_verified_names
 
