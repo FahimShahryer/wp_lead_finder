@@ -41,9 +41,13 @@ def test_build_queries_with_slack_anchor():
     # No cross-platform anchor leak.
     assert not any("chat.whatsapp.com" in q for q in queries)
     assert not any("discord.gg" in q for q in queries)
-    # Term still quoted, negatives still applied.
+    # Term still quoted in every query; negatives applied to majority
+    # (T1=100% + ~70% of T2). 30% of T2 omits negatives by design.
     assert all('"marketing agency"' in q for q in queries)
-    assert all("-india" in q.lower() for q in queries)
+    with_neg = sum(1 for q in queries if "-india" in q.lower())
+    assert with_neg / len(queries) >= 0.6, (
+        f"expected ≥60% of queries to carry -india, got {with_neg}/{len(queries)}"
+    )
 
 
 # ---------- Snowball — DB-only ----------
@@ -111,8 +115,11 @@ async def test_slack_snowball_seeds_queries_with_slack_anchor():
     # Verified workspace names land as quoted seeds.
     assert any('"Demand Curve"' in q for q in queries)
     assert any('"RevOps Co-op"' in q for q in queries)
-    # Negatives still applied.
-    assert all("-india" in q.lower() for q in queries)
+    # Most snowball queries apply negatives — T1=100% + ~70% of T2.
+    with_neg = sum(1 for q in queries if "-india" in q.lower())
+    assert with_neg / len(queries) >= 0.6, (
+        f"expected ≥60% of snowball queries to carry -india, got {with_neg}/{len(queries)}"
+    )
 
 
 # ---------- Live OpenAI integration — gated ----------

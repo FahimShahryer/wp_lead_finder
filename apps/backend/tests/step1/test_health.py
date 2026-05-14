@@ -3,9 +3,11 @@ import os
 import httpx
 import pytest
 
-# When run via `docker compose exec api pytest`, the API is on the same loopback.
-# When run from another container on the compose network, override with API_URL=http://api:8000.
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+# Default to the compose-network hostname so this works from any container
+# (worker, api, etc.). Inside the api container `http://api:8000` resolves to
+# the same place as `http://localhost:8000`, so this default works everywhere.
+# Override with API_URL=... when running outside compose.
+API_URL = os.getenv("API_URL", "http://api:8000")
 
 
 @pytest.mark.asyncio

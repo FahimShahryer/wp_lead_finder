@@ -21,6 +21,7 @@ from src.db.session import SessionLocal
 from src.pipeline.shared.firecrawl_fetch import fetch_pending_firecrawl
 from src.pipeline.shared.prefilter import prefilter_search_results
 from src.pipeline.shared.reddit_fetch import fetch_pending_reddit
+from src.pipeline.shared.subreddit_seed import seed_subreddits_for_campaign
 from src.pipeline.shared.score import score_for_campaign
 from src.pipeline.shared.serper_search import search_pending_queries
 from src.pipeline.slack.extract import extract_for_campaign
@@ -101,6 +102,9 @@ async def run_slack_campaign(campaign_id: int) -> None:
         await _set_stage(campaign_id, "prefilter")
         async with SessionLocal() as s:
             await prefilter_search_results(s, campaign_id)
+
+        await _set_stage(campaign_id, "seed_reddit")
+        await seed_subreddits_for_campaign(campaign_id)
 
         await _set_stage(campaign_id, "fetch_reddit")
         await fetch_pending_reddit(campaign_id)

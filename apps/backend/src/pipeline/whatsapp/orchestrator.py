@@ -10,6 +10,7 @@ from src.pipeline.shared.prefilter import prefilter_search_results
 from src.pipeline.shared.reddit_fetch import fetch_pending_reddit
 from src.pipeline.shared.score import score_for_campaign
 from src.pipeline.shared.serper_search import search_pending_queries
+from src.pipeline.shared.subreddit_seed import seed_subreddits_for_campaign
 from src.pipeline.whatsapp.extract import extract_for_campaign
 from src.pipeline.whatsapp.queries import generate_queries
 
@@ -101,6 +102,13 @@ async def run_whatsapp_campaign(campaign_id: int) -> None:
         await _set_stage(campaign_id, "prefilter")
         async with SessionLocal() as s:
             await prefilter_search_results(s, campaign_id)
+
+        # Cold-start subreddit mining — direct-search curated industry subs for
+        # the platform anchor (chat.whatsapp.com / discord.gg / join.slack.com).
+        # Inserts SearchResults tagged fetch_strategy='reddit' so the next stage
+        # picks them up alongside Serper-routed Reddit URLs.
+        await _set_stage(campaign_id, "seed_reddit")
+        await seed_subreddits_for_campaign(campaign_id)
 
         await _set_stage(campaign_id, "fetch_reddit")
         await fetch_pending_reddit(campaign_id)

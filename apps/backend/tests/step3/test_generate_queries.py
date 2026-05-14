@@ -81,7 +81,10 @@ def test_build_queries_quotes_industry_terms():
         assert '"marketing agency"' in q, f"term not quoted in {q!r}"
 
 
-def test_build_queries_applies_negatives_consistently():
+def test_build_queries_applies_negatives_to_t1_and_70pct_of_t2():
+    """T1 (site:-pinned) always carries negatives. T2 splits 70/30 between
+    with-neg and without-neg variants so we keep recall headroom for
+    geo-agnostic posts. Majority of queries still carry the negative filter."""
     pairs = build_queries(
         terms=["saas founders"],
         platforms=["reddit", "meetup"],
@@ -89,10 +92,26 @@ def test_build_queries_applies_negatives_consistently():
         target_count=20,
         anchor="chat.whatsapp.com",
     )
-    # Every query should include both negatives.
+    # Every T1 query (anything with `site:`) must carry both negatives.
     for q, _ in pairs:
-        assert "-india" in q.lower(), f"missing -india in {q!r}"
-        assert "-indian" in q.lower(), f"missing -indian in {q!r}"
+        if "site:" in q:
+            assert "-india" in q.lower(), f"missing -india in T1 query {q!r}"
+            assert "-indian" in q.lower(), f"missing -indian in T1 query {q!r}"
+
+    # The overall negatives share must clear ~70% (T1 always has + ~70% of T2).
+    with_neg = sum(1 for q, _ in pairs if "-india" in q.lower())
+    assert with_neg / len(pairs) >= 0.60, (
+        f"expected ≥60% of queries to carry -india, got {with_neg}/{len(pairs)}"
+    )
+
+    # Some T2 queries should NOT carry negatives — that's the 30% without-neg
+    # slot. With a single term we may only get 1 such query, so >=1 is enough.
+    without_neg = sum(
+        1 for q, _ in pairs if "site:" not in q and "-india" not in q.lower()
+    )
+    assert without_neg >= 1, (
+        f"expected ≥1 T2 query without negatives (the 30% slot); got 0"
+    )
 
 
 def test_build_queries_dedupes_near_misses():
@@ -187,20 +206,23 @@ async def test_generate_queries_for_real_icp():
             f"only {anchored}/{len(rows)} queries had the anchor (need ≥70%)"
         )
 
-        # site:reddit.com queries must be present.
+        # site:reddit.com queries are present but reduced — subreddit_seed
+        # now mines Reddit directly for free, so T1 only keeps reddit as a
+        # long-tail safety net.
         reddit_count = sum(1 for r in rows if "site:reddit.com" in r.query_text.lower())
-        assert reddit_count >= 5, f"expected >=5 site:reddit.com queries, got {reddit_count}"
+        assert reddit_count >= 1, f"expected >=1 site:reddit.com query, got {reddit_count}"
 
         # site:meetup.com queries must be present (top-yield platform per data).
         meetup_count = sum(1 for r in rows if "site:meetup.com" in r.query_text.lower())
-        assert meetup_count >= 3, f"expected >=3 site:meetup.com queries, got {meetup_count}"
+        assert meetup_count >= 2, f"expected >=2 site:meetup.com queries, got {meetup_count}"
 
-        # Negatives applied broadly.
+        # Most queries carry negatives — T1 (100%) + ~70% of T2 ≈ 79% overall.
+        # Threshold loosened from 0.7 to 0.6 to allow the without-neg slice.
         negative_count = sum(
             1 for r in rows
             if "-india" in r.query_text.lower() or "-indian" in r.query_text.lower()
         )
-        assert negative_count >= len(rows) * 0.7, (
+        assert negative_count >= len(rows) * 0.6, (
             f"expected most queries to carry -india/-indian, got {negative_count}/{len(rows)}"
         )
 

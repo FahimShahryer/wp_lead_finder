@@ -21,12 +21,17 @@ pytestmark = pytest.mark.skipif(
     reason=f"missing one of {REQUIRED_KEYS}; skipping live e2e",
 )
 
-API_URL = os.getenv("API_URL", "http://localhost:8000")
+# Compose-network default — works from worker, api, or any other service.
+# Inside the api container itself, `http://api:8000` resolves the same as
+# `http://localhost:8000`, so this default is correct everywhere.
+API_URL = os.getenv("API_URL", "http://api:8000")
 
 
 SMALL_CAMPAIGN = {
     "name": "step10-e2e",
-    "industries": ["AI agency owners"],
+    # Single 1-2-word industry — matches the API validator added when we
+    # locked the form to a single short term.
+    "industries": ["Marketing"],
     "locations": ["US", "UK"],
     "negative_locations": ["India"],
     # Match the new default platforms (post stage-1 rewrite). reddit / meetup /

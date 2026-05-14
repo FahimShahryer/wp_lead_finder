@@ -1,6 +1,7 @@
 import csv
 import io
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated, Literal
@@ -132,6 +133,16 @@ def invite_url_for(platform: str, invite_id: str) -> str:
     return f"https://chat.whatsapp.com/{invite_id}"
 
 
+# Industry input contract (enforced server-side as well as in the form):
+#   - Exactly ONE industry per campaign
+#   - 1 or 2 words
+#   - Letters and single spaces only — no commas, slashes, hyphens, digits, &
+# Tightening to a single short term keeps the 1A LLM prompt focused on one
+# audience and avoids the synonym-drift we saw when users typed
+# "AI agency, marketing agency owners, growth hackers".
+_INDUSTRY_TOKEN_RE = re.compile(r"^[A-Za-z]+(?:\s[A-Za-z]+)?$")
+
+
 class CreateCampaignRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     industries: list[str] = Field(default_factory=list)
@@ -149,6 +160,23 @@ class CreateCampaignRequest(BaseModel):
     @classmethod
     def _drop_disallowed_platforms(cls, v: list[str]) -> list[str]:
         return [p for p in (v or []) if p.lower().strip() in ALLOWED_PLATFORMS]
+
+    @field_validator("industries")
+    @classmethod
+    def _validate_single_industry(cls, v: list[str]) -> list[str]:
+        cleaned = [s.strip() for s in (v or []) if s and s.strip()]
+        if len(cleaned) != 1:
+            raise ValueError(
+                "industries: exactly one industry is required "
+                f"(got {len(cleaned)})"
+            )
+        industry = " ".join(cleaned[0].split())  # collapse internal whitespace
+        if not _INDUSTRY_TOKEN_RE.fullmatch(industry):
+            raise ValueError(
+                "industries[0] must be 1 or 2 words, letters only "
+                "(no commas, digits, slashes or other punctuation)"
+            )
+        return [industry]
 
 
 class CreateCampaignResponse(BaseModel):

@@ -31,13 +31,17 @@ function splitLines(s: string): string[] {
     .filter(Boolean);
 }
 
+// One industry per campaign, 1-2 words, letters and single spaces only.
+// Matches the server-side validator in main.py — keep them in lockstep.
+const INDUSTRY_PATTERN = /^[A-Za-z]+(?: [A-Za-z]+)?$/;
+
 export default function NewCampaignPage() {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [name, setName] = useState("");
-  const [industries, setIndustries] = useState("AI agency owners\nMarketing agency owners");
+  const [industry, setIndustry] = useState("Marketing");
   const [locations, setLocations] = useState("US\nUK\nDubai");
   const [negativeLocations, setNegativeLocations] = useState("India\nIndian");
   const [platforms, setPlatforms] = useState<string[]>([
@@ -58,14 +62,21 @@ export default function NewCampaignPage() {
     setPlatforms((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
   }
 
+  const industryTrimmed = industry.trim().replace(/\s+/g, " ");
+  const industryValid = INDUSTRY_PATTERN.test(industryTrimmed);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
+    if (!industryValid) {
+      setError("Industry must be 1 or 2 words, letters only.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
       const resp = await api.createCampaign({
         name: name.trim(),
-        industries: splitLines(industries),
+        industries: [industryTrimmed],
         locations: splitLines(locations),
         negative_locations: splitLines(negativeLocations),
         platforms,
@@ -149,13 +160,32 @@ export default function NewCampaignPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="industries">Industries (one per line)</Label>
-              <Textarea
-                id="industries"
-                value={industries}
-                onChange={(e) => setIndustries(e.target.value)}
-                rows={3}
+              <Label htmlFor="industry">Industry</Label>
+              <Input
+                id="industry"
+                value={industry}
+                onChange={(e) => {
+                  // Strip anything that isn't a letter or single space as the
+                  // user types. Blocks commas, digits, punctuation, dashes,
+                  // emoji — keeps the input matching the server-side contract.
+                  const filtered = e.target.value
+                    .replace(/[^A-Za-z\s]/g, "")
+                    .replace(/\s{2,}/g, " ");
+                  setIndustry(filtered);
+                }}
+                placeholder="e.g. Marketing  or  Marketing Agency"
+                maxLength={40}
+                required
               />
+              <p className="text-xs text-muted-foreground">
+                One industry, 1 or 2 words, letters only — the LLM expands this
+                into 8-14 variants for query generation.
+              </p>
+              {industry.trim() && !industryValid && (
+                <p className="text-xs text-destructive">
+                  Must be 1 or 2 words, letters only.
+                </p>
+              )}
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
@@ -246,7 +276,10 @@ export default function NewCampaignPage() {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={submitting || !name.trim()}>
+              <Button
+                type="submit"
+                disabled={submitting || !name.trim() || !industryValid}
+              >
                 {submitting ? "Submitting…" : "Run campaign"}
               </Button>
             </div>

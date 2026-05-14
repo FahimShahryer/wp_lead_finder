@@ -81,8 +81,12 @@ async def test_snowball_seeds_queries_from_verified_group_names():
     # At least one of each group name should appear quoted in the queries.
     assert any('"AI Marketing Agency Founders"' in q for q in queries)
     assert any('"Digital Agency Owners Network"' in q for q in queries)
-    # All queries should still apply the campaign's negative-location filter.
-    assert all("-india" in q.lower() for q in queries)
+    # Most queries should apply the negative-location filter — T1 (100%) plus
+    # ~70% of T2 — but the 30% without-neg T2 slot means it's not 100%.
+    with_neg = sum(1 for q in queries if "-india" in q.lower())
+    assert with_neg / len(queries) >= 0.6, (
+        f"expected ≥60% of snowball queries to carry -india, got {with_neg}/{len(queries)}"
+    )
 
 
 async def test_snowball_dedupes_against_existing_queries():

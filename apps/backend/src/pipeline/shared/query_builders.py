@@ -39,28 +39,44 @@ logger = logging.getLogger(__name__)
 # visible. Reddit, Meetup, and Eventbrite are where invites actually live.
 ALLOWED_QUERY_PLATFORMS: tuple[str, ...] = ("reddit", "meetup", "eventbrite")
 
-# Per-platform yield weighting inside T1. Reddit gets the most slots (highest
-# organic invite density + free fetch via asyncpraw), then meetup (top Google-
-# snippet performer per the data), then eventbrite.
+# Per-platform yield weighting inside T1. Meetup leads (top Google-snippet
+# performer per real-campaign data); reddit and eventbrite split the rest.
+# Reddit's slot is reduced from its earlier 0.45 because subreddit_seed.py now
+# mines Reddit directly for free — Serper's `site:reddit.com` queries are kept
+# only to catch posts in long-tail subs not in our curated seed list.
 PLATFORM_WEIGHTS: dict[str, float] = {
-    "reddit": 0.45,
-    "meetup": 0.35,
-    "eventbrite": 0.20,
+    "reddit": 0.30,
+    "meetup": 0.40,
+    "eventbrite": 0.30,
 }
 
 # Tier weights — fraction of total query budget allocated to each template.
-# T1 + T2 are the two snippet-hit paths: both carry the platform anchor so
-# Google leans toward invite-bearing pages and the URL often appears in the
-# snippet verbatim.
+# T1 = precision (site-pinned), T2 = broad-net open-web. Tilted heavily toward
+# T2 because (a) subreddit_seed handles the Reddit slice for free, dropping the
+# need for T1 to carry Reddit recall, and (b) open-web search surfaces sites
+# we haven't curated (indiehackers, hubspot community, substack, etc.) that
+# would otherwise be invisible to a strictly site-pinned strategy.
 TIER_WEIGHTS: tuple[tuple[str, float], ...] = (
-    ("T1", 0.65),  # precision: anchor + quoted term + site:
-    ("T2", 0.35),  # broad-net snippet-hit: anchor + quoted term, no site:
+    ("T1", 0.30),  # site-pinned precision: anchor + quoted term + site:
+    ("T2", 0.70),  # open-web broad-net: anchor + quoted term, no site:
 )
 
-# Cap on industry-term variants returned by 1A. Beyond ~10 the variants start
-# overlapping each other; below 6 the combinator runs out of cartesian space.
-MAX_TERMS_PER_INDUSTRY = 10
-MIN_TERMS_PER_INDUSTRY = 6
+# Within T2, fraction of queries that include the negative-location filter.
+# The remainder are sent WITHOUT negatives — this catches communities in
+# posts that don't pre-name a geography in the snippet (e.g. "best B2B group
+# for marketers" with no country mentioned). Without-negs queries return
+# wider results; with-negs queries are more precise. The 70/30 split keeps
+# precision as the default while reserving recall headroom.
+T2_WITH_NEG_FRACTION = 0.70
+
+# Cap on industry-term variants returned by 1A. Industries are now single
+# short terms (1-2 words, enforced at the API), so the LLM has to do all the
+# vocabulary lifting. Raised from 10 → 14 so T2 (70% of the query budget) can
+# actually fill its slots (T2 has 2 templates per term, so 14 terms → up to 28
+# unique T2 queries — enough headroom for a 27-query target). Past ~14 the
+# variants start running into pure synonyms.
+MAX_TERMS_PER_INDUSTRY = 14
+MIN_TERMS_PER_INDUSTRY = 8
 
 # Cap on group-name length we'll accept as a snowball seed. Names longer than
 # this won't fit cleanly in a quoted Google query alongside the anchor and
@@ -81,15 +97,16 @@ SNOWBALL_DEFAULT_TARGET = 60
 class IndustryTermExpansion(BaseModel):
     terms: list[str] = Field(
         description=(
-            "6-10 distinct, specific, quoted-able phrasings of the same audience "
+            "8-14 distinct, specific, quoted-able phrasings of the same audience "
             "as the seed industry. Each item is a single short phrase."
         )
     )
 
 
 EXPANSION_SYSTEM_PROMPT = """\
-You expand a single industry seed into 6-10 specific quoted-able variants
-that target the SAME audience but vary in phrasing.
+You expand a single short industry seed (typically 1-2 words like "Marketing"
+or "Marketing Agency") into 8-14 specific quoted-able variants that target the
+SAME audience but vary in phrasing.
 
 Examples:
 
@@ -204,19 +221,33 @@ def _normalize_for_dedup(query: str) -> str:
 
 
 def _platforms_cycled(platforms: list[str], rounds: int) -> list[str]:
-    """Yield platforms in weight-proportional order. Reddit appears more often
-    than meetup, which appears more often than eventbrite — matches yield."""
+    """Yield platforms in smoothly-interleaved, weight-proportional order.
+
+    Uses deficit-round-robin: at each step pick the platform that is furthest
+    behind its weighted target. For weights {reddit:0.3, meetup:0.4, eventbrite:0.3}
+    over 8 rounds, this produces ~3/3/2 instead of clumping all of one platform's
+    slots together (which was the bug in the previous extend-then-slice version —
+    a small target_count would only ever see the first platform).
+    """
     if not platforms:
         return []
-    SCALE = 20
-    pool: list[str] = []
-    for p in platforms:
-        slots = max(1, round(PLATFORM_WEIGHTS.get(p, 0.33) * SCALE))
-        pool.extend([p] * slots)
-    if not pool:
-        return []
-    repeats = (rounds + len(pool) - 1) // len(pool)
-    return (pool * max(1, repeats))[:rounds]
+    default_w = 1.0 / len(platforms)
+    weights = {p: PLATFORM_WEIGHTS.get(p, default_w) for p in platforms}
+    counts: dict[str, int] = {p: 0 for p in platforms}
+    result: list[str] = []
+    for i in range(rounds):
+        # Pick the platform with the largest deficit vs its weighted target so far.
+        # Stable tie-break: iterating `platforms` in declaration order means
+        # earlier-listed platforms win ties — keeps output deterministic.
+        best_p = platforms[0]
+        best_deficit = weights[best_p] * (i + 1) - counts[best_p]
+        for p in platforms[1:]:
+            d = weights[p] * (i + 1) - counts[p]
+            if d > best_deficit:
+                best_p, best_deficit = p, d
+        result.append(best_p)
+        counts[best_p] += 1
+    return result
 
 
 def build_queries(
@@ -261,9 +292,15 @@ def build_queries(
         base = f'{anchor} "{term}" site:{platform}.com'
         return f"{base} {neg}".strip() if neg else base
 
-    def _t2(term: str) -> str:
+    def _t2_with_neg(term: str) -> str:
         base = f'{anchor} "{term}"'
         return f"{base} {neg}".strip() if neg else base
+
+    def _t2_without_neg(term: str) -> str:
+        # Drops the negative-location filter even when the campaign has one,
+        # so this query slot returns geo-agnostic communities the with-neg
+        # form would miss.
+        return f'{anchor} "{term}"'
 
     targets = {tier: max(1, round(target_count * w)) for tier, w in TIER_WEIGHTS}
 
@@ -279,14 +316,26 @@ def build_queries(
         if _push(_t1(term, platform), platform if platform == "reddit" else "web"):
             t1_done += 1
 
-    # T2 — broad-net: one query per term, no site: constraint.
-    t2_target = min(targets["T2"], len(terms))
-    t2_done = 0
+    # T2 — broad-net open-web. Split 70/30 between with-negs and without-negs
+    # variants. Cap at 2 queries per term so we don't exhaust the variant
+    # space (each term contributes at most one of each flavor).
+    t2_target = min(targets["T2"], len(terms) * 2)
+    t2_with_neg_target = round(t2_target * T2_WITH_NEG_FRACTION)
+    t2_without_neg_target = t2_target - t2_with_neg_target
+
+    t2_with_done = 0
     for term in terms:
-        if t2_done >= t2_target:
+        if t2_with_done >= t2_with_neg_target:
             break
-        if _push(_t2(term), "web"):
-            t2_done += 1
+        if _push(_t2_with_neg(term), "web"):
+            t2_with_done += 1
+
+    t2_without_done = 0
+    for term in terms:
+        if t2_without_done >= t2_without_neg_target:
+            break
+        if _push(_t2_without_neg(term), "web"):
+            t2_without_done += 1
 
     return out[:target_count]
 
