@@ -34,8 +34,9 @@ DISCORD_INVITE_RE = re.compile(
 # Detects Slack shared-invite URLs. Modern form (2020+):
 #   https://join.slack.com/t/<workspace>/shared_invite/<token>
 # - workspace: alnum + hyphen, 3-30 chars (Slack's URL-slug rules)
-# - token: starts with `zt-` typically, alnum + hyphens, ~20-40 chars in
-#   practice. We cap at 80 for forward-compat with longer tokens.
+# - token: starts with `zt-` typically, alnum + hyphens + UNDERSCORES, 10-80
+#   chars. Slack tokens use a base64url-ish alphabet — underscores ARE valid
+#   characters inside tokens. Real example: `zt-zgitr2si-NKtdWC9IkdmvL_o4BC1kYA`.
 #
 # `(?<![a-zA-Z0-9])` rejects lookalike prefixes like "myjoin.slack.com/t/".
 # `(?![A-Za-z0-9_-])` after the token stops over-long junk from being
@@ -46,7 +47,7 @@ DISCORD_INVITE_RE = re.compile(
 # and the URL is reconstructible by the validator.
 SLACK_INVITE_RE = re.compile(
     r"(?<![a-zA-Z0-9])"
-    r"join\.slack\.com/t/([a-z0-9-]{3,30})/shared_invite/([A-Za-z0-9-]{10,80})"
+    r"join\.slack\.com/t/([a-z0-9-]{3,30})/shared_invite/([A-Za-z0-9_-]{10,80})"
     r"(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )

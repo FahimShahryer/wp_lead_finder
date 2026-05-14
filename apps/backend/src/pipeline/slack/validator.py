@@ -195,10 +195,15 @@ async def fetch_invites(
     async with httpx.AsyncClient(
         timeout=REQUEST_TIMEOUT,
         headers={
-            # A descriptive User-Agent is the polite way to identify a scraper.
-            # Helps Slack's ops team route any complaints to the right place.
-            "User-Agent": "wp2-leadfinder (Slack invite validator)",
-            "Accept": "text/html,application/xhtml+xml",
+            # Slack returns HTTP 500 (with a JS-rendered page body) for any
+            # User-Agent that contains a `(...)` parenthesized comment — even
+            # `Mozilla/5.0 (compatible; wp2-leadfinder/...)`. A bare `Mozilla/5.0`
+            # gets the actual status (200 for live invites, 403 for expired,
+            # 404 for nonexistent). curl/* and Firefox/* both work too. We pick
+            # the bare form because it's the most stable across UA-sniffing
+            # changes Slack might make.
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         },
     ) as client:

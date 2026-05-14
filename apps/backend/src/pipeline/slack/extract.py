@@ -20,14 +20,18 @@ from src.pipeline.shared.extract_helpers import run_extract_for_campaign
 
 # Modern Slack invite URL: https://join.slack.com/t/<workspace>/shared_invite/<token>
 #   - workspace: alnum + hyphen, 3-30 chars (Slack's URL-slug rules)
-#   - token:     alnum + hyphens, ~10-80 chars (typically zt-XXX-XXX-XXX format)
+#   - token:     alnum + hyphens + underscores, ~10-80 chars. Format is
+#                typically `zt-<segment>-<segment>` but the segments use
+#                base64url-ish alphabet that INCLUDES underscores. A real
+#                example: `zt-zgitr2si-NKtdWC9IkdmvL_o4BC1kYA` — note the
+#                underscore between `IkdmvL` and `o4BC1kYA`.
 #
 # Boundary guards:
 #   `(?<![a-zA-Z0-9])` rejects "myjoin.slack.com/t/..." style lookalikes
 #   `(?![A-Za-z0-9_-])` after the token stops over-long junk consuming a match
 _INVITE_RE = re.compile(
     r"(?<![a-zA-Z0-9])"
-    r"join\.slack\.com/t/([a-z0-9-]{3,30})/shared_invite/([A-Za-z0-9-]{10,80})"
+    r"join\.slack\.com/t/([a-z0-9-]{3,30})/shared_invite/([A-Za-z0-9_-]{10,80})"
     r"(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )

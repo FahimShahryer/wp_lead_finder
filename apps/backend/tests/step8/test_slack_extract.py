@@ -49,6 +49,13 @@ from src.pipeline.slack.extract import extract_for_campaign, extract_invites
             "join.slack.com/t/ai-marketing-network/shared_invite/zt-1xyz23-AAABBBCCC",
             ["ai-marketing-network/zt-1xyz23-AAABBBCCC"],
         ),
+        # Token with UNDERSCORE — real-world Slack tokens use base64url
+        # alphabet (alnum + hyphen + underscore). Caught by a real campaign:
+        # https://join.slack.com/t/smartalpaca/shared_invite/zt-zgitr2si-NKtdWC9IkdmvL_o4BC1kYA
+        (
+            "https://join.slack.com/t/smartalpaca/shared_invite/zt-zgitr2si-NKtdWC9IkdmvL_o4BC1kYA",
+            ["smartalpaca/zt-zgitr2si-NKtdWC9IkdmvL_o4BC1kYA"],
+        ),
         # No invite
         ("no link here at all", []),
         # Malformed (missing token)
