@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { MessageCircle } from "lucide-react";
 
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,18 @@ const PLATFORM_OPTIONS = [
   "eventbrite",
   "web",
 ] as const;
+
+// ─── DEMO TOGGLE ───────────────────────────────────────────────────────────
+// Which invite ecosystems are offered in the UI. For the client demo we expose
+// WhatsApp only. To turn Discord / Slack back on, restore the commented values:
+//   const ENABLED_PLATFORMS = ["whatsapp", "discord", "slack"] as const;
+const ENABLED_PLATFORMS = ["whatsapp"] as const; // ["whatsapp", "discord", "slack"]
+const PLATFORM_LABELS: Record<string, string> = {
+  whatsapp: "WhatsApp",
+  discord: "Discord",
+  slack: "Slack",
+};
+// ───────────────────────────────────────────────────────────────────────────
 
 function splitLines(s: string): string[] {
   return s
@@ -120,23 +133,20 @@ export default function NewCampaignPage() {
             <div className="space-y-2">
               <Label>Run campaign for</Label>
               <div className="flex gap-2">
-                {(["whatsapp", "discord", "slack"] as const).map((p) => (
+                {ENABLED_PLATFORMS.map((p) => (
                   <button
                     key={p}
                     type="button"
                     onClick={() => setPlatform(p)}
                     className={
-                      "flex-1 rounded-md border px-3 py-2 text-sm font-medium transition " +
+                      "flex-1 inline-flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm font-semibold transition-all " +
                       (platform === p
-                        ? "border-primary bg-primary text-primary-foreground"
-                        : "border-input bg-background hover:bg-accent")
+                        ? "border-primary bg-primary text-primary-foreground shadow-soft"
+                        : "border-input bg-card hover:bg-accent hover:border-primary/40")
                     }
                   >
-                    {p === "whatsapp"
-                      ? "WhatsApp"
-                      : p === "discord"
-                        ? "Discord"
-                        : "Slack"}
+                    <MessageCircle className="h-4 w-4" />
+                    {PLATFORM_LABELS[p] ?? p}
                   </button>
                 ))}
               </div>

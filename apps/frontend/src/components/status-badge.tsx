@@ -12,10 +12,22 @@ const LABEL: Record<string, string> = {
   budget_exceeded: "budget hit",
 };
 
+// Friendly names for the raw pipeline stage keys the backend reports.
+const STAGE_LABEL: Record<string, string> = {
+  queries: "Queries",
+  search: "Searching",
+  prefilter: "Filtering",
+  seed_reddit: "Seeding",
+  fetch_reddit: "Reddit",
+  fetch_web: "Scraping",
+  extract: "Extracting",
+  score: "Scoring",
+};
+
 export function StatusBadge({ status, stage }: { status: string; stage?: string | null }) {
   const variant = VARIANT[status] || "outline";
   const base = LABEL[status] ?? status;
-  const label = status === "running" && stage ? `${stage}` : base;
+  const label = status === "running" && stage ? (STAGE_LABEL[stage] ?? stage) : base;
   return (
     // @ts-expect-error variant type is constrained but we narrow above
     <Badge variant={variant} className="capitalize">

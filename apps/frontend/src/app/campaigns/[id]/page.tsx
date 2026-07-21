@@ -44,30 +44,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/status-badge";
 import { PlatformBadge } from "@/components/platform-badge";
 import { CategorizePanel } from "@/components/categorize-panel";
 import { ExportPanel } from "@/components/export-panel";
+import { PipelineProgress } from "@/components/pipeline-progress";
 
 const TERMINAL = new Set(["done", "budget_exceeded", "failed"]);
-
-function StatStat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: React.ReactNode;
-  hint?: string;
-}) {
-  return (
-    <div className="space-y-1">
-      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
-      <div className="text-2xl font-semibold tabular-nums">{value}</div>
-      {hint && <div className="text-xs text-muted-foreground">{hint}</div>}
-    </div>
-  );
-}
 
 const ACTIVITY_VARIANT: Record<string, "default" | "secondary" | "outline" | "success" | "warning" | "destructive"> = {
   new: "secondary",
@@ -289,7 +273,41 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
     }
   }
 
-  if (!campaign) return <div className="text-muted-foreground">Loading campaign…</div>;
+  if (!campaign) {
+    return (
+      <div className="space-y-6">
+        <div className="space-y-2">
+          <Skeleton className="h-3 w-24" />
+          <Skeleton className="h-8 w-72" />
+          <Skeleton className="h-4 w-96" />
+        </div>
+        <div className="rounded-xl border border-border bg-card p-5 shadow-card">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-6 w-6 rounded-full" />
+            <div className="flex-1 space-y-2">
+              <Skeleton className="h-4 w-56" />
+              <Skeleton className="h-3 w-80" />
+            </div>
+          </div>
+          <Skeleton className="mt-4 h-2 w-full rounded-full" />
+          <div className="mt-4 flex justify-between gap-2">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <Skeleton key={i} className="h-9 w-9 rounded-full" />
+            ))}
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-14 rounded-lg" />
+            ))}
+          </div>
+        </div>
+        <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
+          <Skeleton className="h-64 rounded-xl" />
+          <Skeleton className="h-64 rounded-xl" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -315,34 +333,7 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg">Pipeline progress</CardTitle>
-          <CardDescription>
-            {TERMINAL.has(campaign.status) ? "Run finished." : "Auto-refresh every 2 seconds."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4 lg:grid-cols-6">
-            <StatStat label="Queries" value={campaign.queries_count} />
-            <StatStat label="Search results" value={campaign.search_results_count} />
-            <StatStat label="Leads" value={campaign.leads_count} />
-            <StatStat
-              label="Scored"
-              value={campaign.scored_leads_count}
-              hint={`of ${campaign.leads_count}`}
-            />
-            <StatStat
-              label="Serper"
-              value={`${campaign.serper_credits_used}/${campaign.max_credits_serper}`}
-            />
-            <StatStat
-              label="Firecrawl"
-              value={`${campaign.firecrawl_credits_used}/${campaign.max_credits_firecrawl}`}
-            />
-          </div>
-        </CardContent>
-      </Card>
+      <PipelineProgress campaign={campaign} />
 
       <CategorizePanel campaignId={cid} platform={campaign.platform} />
 
