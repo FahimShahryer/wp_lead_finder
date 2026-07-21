@@ -1,0 +1,221 @@
+# =============================================================================
+# wp_lead_finder — PRODUCTION deploy for the Hostinger VPS
+# (community-finder.unicornstudio.io, co-hosted with bizz + vizz).
+#
+# Differences vs docker-compose.yml (dev):
+#   - Self-contained (does NOT extend the dev file). Run it alone.
+#   - No host port publishing — every service is reachable only over the
+#     `community_finder_net` docker network. bizz's Caddy joins that network
+#     and is the single public surface (TLS + basic-auth gate).
+#   - Production builds: frontend uses Dockerfile.prod (next standalone), api
+#     runs without --reload and applies alembic migrations on startup.
+#   - No source bind mounts — images are immutable.
+#   - Per-service memory limits sized for the shared 7.8 GB box.
+#
+# Usage on the VPS (/opt/community-finder):
+#   docker network create community_finder_net      # one-time
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml up -d
+# =============================================================================
+
+name: community-finder
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: community-finder-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - community_finder_net
+    oom_score_adj: -200
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  redis:
+    image: redis:7-alpine
+    container_name: community-finder-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - community_finder_net
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+
+  # Daily pg_dump → ./backups/ on the host, 14-day rotation.
+  db-backup:
+    image: postgres:16-alpine
+    container_name: community-finder-db-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      BACKUP_DIR: /backups
+      RETENTION_DAYS: "14"
+      INTERVAL_SECONDS: "86400"
+    volumes:
+      - ./backups:/backups
+      - ./scripts/db_backup.sh:/usr/local/bin/db_backup.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/db_backup.sh"]
+    networks:
+      - community_finder_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  wa-sidecar:
+    build:
+      context: ./apps/wa-sidecar
+    container_name: community-finder-wa-sidecar
+    restart: unless-stopped
+    volumes:
+      - wa_sessions:/data/sessions
+    environment:
+      PORT: "3001"
+      SESSIONS_DIR: /data/sessions
+      LOG_LEVEL: info
+      API_URL: http://api:8000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    networks:
+      - community_finder_net
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  api:
+    build:
+      context: ./apps/backend
+    container_name: community-finder-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WA_SIDECAR_URL: http://wa-sidecar:3001
+      WA_SIDECAR_SECRET: ${INTERNAL_TOKEN}
+    # Apply migrations on every startup (idempotent), then serve without reload.
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn src.main:app --host 0.0.0.0 --port 8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      wa-sidecar:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - community_finder_net
+    oom_score_adj: -300
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          cpus: "0.3"
+
+  worker:
+    build:
+      context: ./apps/backend
+    container_name: community-finder-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WA_SIDECAR_URL: http://wa-sidecar:3001
+      WA_SIDECAR_SECRET: ${INTERNAL_TOKEN}
+    command: ["arq", "src.worker.WorkerSettings"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'arq src.worker' >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    networks:
+      - community_finder_net
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Browser calls go same-origin through Caddy: /api/* is proxied to the
+        # api container with the prefix stripped.
+        NEXT_PUBLIC_API_URL: https://community-finder.unicornstudio.io/api
+    container_name: community-finder-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      api:
+        condition: service_healthy
+    expose:
+      - "3000"
+    networks:
+      - community_finder_net
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+volumes:
+  postgres_data:
+  redis_data:
+  wa_sessions:
+
+networks:
+  community_finder_net:
+    # Pre-created on the VPS via:  docker network create community_finder_net
+    # bizz's caddy joins the same external network to reverse-proxy
+    # community-finder-web / community-finder-api by container name.
+    external: true
+    name: community_finder_net

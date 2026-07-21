@@ -1,0 +1,42 @@
+# Production image for the Next.js 15 dashboard using `output: "standalone"`.
+# Dev still uses ./Dockerfile (npm run dev); this file is referenced only by
+# docker-compose.prod.yml.
+
+# ─── deps ─────────────────────────────────────────────────────
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm install --no-audit --no-fund
+
+# ─── builder ──────────────────────────────────────────────────
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules /app/node_modules
+COPY . /app
+
+# The browser bundle bakes NEXT_PUBLIC_API_URL at build time. Strip any local
+# override files so the build arg is the single source of truth, and ensure a
+# public/ dir exists (this project ships without one) so the standalone COPY
+# below never fails.
+RUN rm -f .env.local .env.*.local && mkdir -p public
+
+ARG NEXT_PUBLIC_API_URL=/api
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# ─── runtime ──────────────────────────────────────────────────
+FROM node:20-alpine AS runtime
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
+
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]

@@ -22,6 +22,13 @@ next-env.d.ts
 .env.*.local
 !.env.example
 
+# --- SSH keys (never commit private keys) ---
+id_ed25519
+id_ed25519.pub
+id_rsa
+id_rsa.pub
+*.pem
+
 # --- Editors ---
 .idea/
 .vscode/
