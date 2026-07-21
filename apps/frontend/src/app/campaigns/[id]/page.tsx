@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { use, useState } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import useSWR, { mutate } from "swr";
 import {
   Archive,
@@ -166,31 +166,57 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteMsg, setDeleteMsg] = useState<string | null>(null);
 
+  // The run is only truly finished when the orchestrator clears current_stage
+  // in _finalize(). IMPORTANT: status can go terminal ('budget_exceeded') mid-run
+  // — it's set the instant a paid stage hits its cap, but extract + score still
+  // run afterward and create the leads. So "done" must key off current_stage,
+  // NOT status, or polling stops early and the leads list stays empty until a
+  // manual reload.
+  const isFinalized = (c?: CampaignStatus | null) =>
+    !!c && TERMINAL.has(c.status) && c.current_stage == null;
+
   const { data: campaign } = useSWR<CampaignStatus>(`/campaigns/${cid}`, fetcher, {
-    refreshInterval: (latest) =>
-      latest && TERMINAL.has(latest.status) ? 0 : 2000,
+    refreshInterval: (latest) => (isFinalized(latest) ? 0 : 2000),
   });
+
+  const done = isFinalized(campaign);
 
   const { data: activity } = useSWR<ActivityRow[]>(
     `/campaigns/${cid}/activity?limit=20`,
     fetcher,
-    { refreshInterval: campaign && TERMINAL.has(campaign.status) ? 0 : 2000 },
+    { refreshInterval: done ? 0 : 2000 },
   );
 
   const tagFilterQs = tagFilter.map((t) => `&tag_id=${t}`).join("");
   const statusQs = statusFilter === "all" ? "" : `&status=${statusFilter}`;
   const leadsKey = `/campaigns/${cid}/leads?limit=100${statusQs}${tagFilterQs}`;
   const { data: leads } = useSWR<Lead[]>(leadsKey, fetcher, {
-    refreshInterval: campaign && TERMINAL.has(campaign.status) ? 0 : 5000,
+    refreshInterval: done ? 0 : 3000,
   });
 
   const countsKey = `/campaigns/${cid}/leads/status-counts`;
   const { data: counts } = useSWR<StatusCounts>(countsKey, fetcher, {
-    refreshInterval: campaign && TERMINAL.has(campaign.status) ? 0 : 5000,
+    refreshInterval: done ? 0 : 3000,
   });
 
   const tagsKey = `/campaigns/${cid}/tags`;
-  const { data: tags } = useSWR<Tag[]>(tagsKey, fetcher);
+  const { data: tags } = useSWR<Tag[]>(tagsKey, fetcher, {
+    refreshInterval: done ? 0 : 5000,
+  });
+
+  // Belt-and-suspenders: the instant the run finalizes, force one final refresh
+  // of everything the last pipeline stages populate, so leads/counts/tags land
+  // immediately without a manual reload even if a poll was mid-flight.
+  const wasDone = useRef(false);
+  useEffect(() => {
+    if (done && !wasDone.current) {
+      mutate(leadsKey);
+      mutate(countsKey);
+      mutate(tagsKey);
+      mutate(`/campaigns/${cid}/activity?limit=20`);
+    }
+    wasDone.current = done;
+  }, [done, leadsKey, countsKey, tagsKey, cid]);
 
   function toggleTagFilter(id: number) {
     setTagFilter((prev) =>

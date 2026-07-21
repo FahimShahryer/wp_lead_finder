@@ -59,20 +59,24 @@ function Metric({ label, value, sub, active }: { label: string; value: React.Rea
 }
 
 export function PipelineProgress({ campaign }: { campaign: Campaign }) {
-  const running = campaign.status === "running";
+  // Still working whenever the orchestrator has a current_stage set — even if
+  // status already flipped to 'budget_exceeded' (a paid cap was hit, but
+  // extract + score are still running). Only a null stage means truly finished.
+  const running = campaign.current_stage != null || campaign.status === "running";
   const stageIndex = Math.max(0, STAGES.findIndex((s) => s.key === campaign.current_stage));
   const activeKey = running ? STAGES[stageIndex]?.key : null;
   const doneThrough = running ? stageIndex : STAGES.length; // steps before current are done
   const pct = running ? Math.round(((stageIndex + 0.5) / STAGES.length) * 100) : 100;
 
-  const banner =
-    campaign.status === "done"
+  const banner = running
+    ? { icon: <Loader2 className="h-5 w-5 animate-spin" />, tone: "text-primary", ring: "border-primary/30 bg-primary/5", title: STAGES[stageIndex]?.caption ?? "Working…", sub: `Step ${stageIndex + 1} of ${STAGES.length} — sit tight, this usually takes 1–2 minutes.` }
+    : campaign.status === "done"
       ? { icon: <CheckCircle2 className="h-5 w-5" />, tone: "text-success", ring: "border-success/30 bg-success/5", title: "Campaign complete", sub: "All stages finished — your leads are ready below." }
       : campaign.status === "budget_exceeded"
         ? { icon: <AlertTriangle className="h-5 w-5" />, tone: "text-warning", ring: "border-warning/30 bg-warning/5", title: "Finished — budget reached", sub: "A paid step hit its credit cap; leads from what was fetched are below." }
         : campaign.status === "failed"
           ? { icon: <XCircle className="h-5 w-5" />, tone: "text-destructive", ring: "border-destructive/30 bg-destructive/5", title: "Run failed", sub: "Something went wrong mid-run. Check the logs and re-run." }
-          : { icon: <Loader2 className="h-5 w-5 animate-spin" />, tone: "text-primary", ring: "border-primary/30 bg-primary/5", title: STAGES[stageIndex]?.caption ?? "Working…", sub: `Step ${stageIndex + 1} of ${STAGES.length} — sit tight, this usually takes 1–2 minutes.` };
+          : { icon: <CheckCircle2 className="h-5 w-5" />, tone: "text-success", ring: "border-success/30 bg-success/5", title: "Campaign complete", sub: "Your leads are ready below." };
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-card shadow-card">
@@ -102,7 +106,7 @@ export function PipelineProgress({ campaign }: { campaign: Campaign }) {
           <div
             className={cn(
               "h-full rounded-full transition-all duration-700 ease-out",
-              campaign.status === "failed" ? "bg-destructive" : campaign.status === "budget_exceeded" ? "bg-warning" : "bg-primary",
+              running ? "bg-primary" : campaign.status === "failed" ? "bg-destructive" : campaign.status === "budget_exceeded" ? "bg-warning" : "bg-primary",
             )}
             style={{ width: `${pct}%` }}
           />
