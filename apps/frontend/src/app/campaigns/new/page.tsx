@@ -218,9 +218,9 @@ export default function NewCampaignPage() {
                       type="checkbox"
                       checked={platforms.includes(p)}
                       onChange={() => togglePlatform(p)}
-                      className="h-4 w-4"
+                      className="h-4 w-4 accent-primary"
                     />
-                    {p}
+                    <span className="capitalize">{p}</span>
                   </label>
                 ))}
               </div>

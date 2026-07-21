@@ -1,0 +1,19 @@
+# Normalise line endings so Linux (the VPS) always gets LF regardless of the
+# committer's OS. Prevents CRLF from Windows breaking shell scripts on deploy.
+* text=auto eol=lf
+
+# Scripts and container/config files MUST be LF (CRLF breaks /bin/sh, entrypoints).
+*.sh   text eol=lf
+*.mjs  text eol=lf
+Dockerfile* text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# Binaries — never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary

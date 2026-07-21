@@ -1,41 +1,32 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import "./globals.css";
+import { AppShell } from "@/components/app-shell";
 
 export const metadata: Metadata = {
-  title: "wp2 — lead finder",
-  description: "WhatsApp group prospecting dashboard",
+  title: "Community Finder — lead engine",
+  description: "Find, score, and engage WhatsApp / Discord / Slack community leads.",
 };
+
+// Inline, render-blocking theme bootstrap: reads the saved preference (or the
+// OS setting) and sets the `dark` class before first paint, so there's no
+// flash of the wrong theme.
+const themeScript = `
+(function(){try{
+  var t = localStorage.getItem('theme');
+  if(t === 'dark' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)){
+    document.documentElement.classList.add('dark');
+  }
+}catch(e){}})();
+`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
       <body>
-        <header className="border-b">
-          <div className="container flex h-14 items-center justify-between">
-            <Link href="/" className="text-base font-semibold">
-              wp2 · lead finder
-            </Link>
-            <nav className="flex gap-4 text-sm">
-              <Link href="/" className="text-muted-foreground hover:text-foreground">
-                Campaigns
-              </Link>
-              <Link href="/inbox" className="text-muted-foreground hover:text-foreground">
-                Inbox
-              </Link>
-              <Link href="/broadcasts" className="text-muted-foreground hover:text-foreground">
-                Broadcasts
-              </Link>
-              <Link
-                href="/campaigns/new"
-                className="text-foreground font-medium hover:underline"
-              >
-                + New
-              </Link>
-            </nav>
-          </div>
-        </header>
-        <main className="container py-6">{children}</main>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

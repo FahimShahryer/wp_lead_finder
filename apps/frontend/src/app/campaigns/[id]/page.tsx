@@ -76,9 +76,23 @@ const ACTIVITY_VARIANT: Record<string, "default" | "secondary" | "outline" | "su
   extracted: "default",
 };
 
+const ACTIVITY_DOT: Record<string, string> = {
+  new: "bg-muted-foreground/50",
+  fetched: "bg-success",
+  fetch_failed: "bg-destructive",
+  extracted: "bg-primary",
+};
+
 function ActivityBadge({ status }: { status: string }) {
-  // @ts-expect-error narrow above
-  return <Badge variant={ACTIVITY_VARIANT[status] || "outline"}>{status}</Badge>;
+  return (
+    <Badge
+      // @ts-expect-error narrow above
+      variant={ACTIVITY_VARIANT[status] || "outline"}
+      className="px-1.5 py-0 text-[10px]"
+    >
+      {status}
+    </Badge>
+  );
 }
 
 type Transition = {
@@ -332,70 +346,61 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
 
       <CategorizePanel campaignId={cid} platform={campaign.platform} />
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
+      <div className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)] xl:items-start">
+        <Card className="xl:sticky xl:top-6">
+          <CardHeader className="pb-3">
             <CardTitle className="text-lg">Live activity</CardTitle>
             <CardDescription>
               Most recent search results processed (newest first).
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>URL</TableHead>
-                  <TableHead className="w-32">Strategy</TableHead>
-                  <TableHead className="w-32">Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {activity && activity.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={3} className="py-6 text-center text-muted-foreground">
-                      No activity yet.
-                    </TableCell>
-                  </TableRow>
-                )}
-                {activity?.map((row) => (
-                  <TableRow key={row.search_result_id}>
-                    <TableCell className="max-w-[280px] truncate">
-                      <a
-                        href={row.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="hover:underline"
-                        title={row.title || row.url}
-                      >
+            <div className="max-h-[34vh] divide-y divide-border/60 overflow-y-auto xl:max-h-[66vh]">
+              {activity && activity.length === 0 && (
+                <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+                  No activity yet.
+                </div>
+              )}
+              {activity?.map((row) => (
+                <a
+                  key={row.search_result_id}
+                  href={row.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block px-4 py-2.5 transition-colors hover:bg-muted/40"
+                  title={row.title || row.url}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className={"mt-1.5 h-2 w-2 shrink-0 rounded-full " + ACTIVITY_DOT[row.status]} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium leading-snug">
                         {row.title || row.url}
-                      </a>
-                      <div className="truncate text-xs text-muted-foreground">{row.url}</div>
-                    </TableCell>
-                    <TableCell>
-                      {row.fetch_strategy ? (
-                        <Badge variant="outline">{row.fetch_strategy}</Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <ActivityBadge status={row.status} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                      </div>
+                      <div className="truncate text-[11px] text-muted-foreground">{row.url}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1">
+                        {row.fetch_strategy && (
+                          <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                            {row.fetch_strategy}
+                          </Badge>
+                        )}
+                        <ActivityBadge status={row.status} />
+                      </div>
+                    </div>
+                  </div>
+                </a>
+              ))}
+            </div>
           </CardContent>
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-start justify-between gap-2 space-y-0">
+          <CardHeader className="flex flex-col gap-3 space-y-0 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <CardTitle className="text-lg">Leads</CardTitle>
               <CardDescription>Move leads through the lifecycle. Ranked by total score within each tab.</CardDescription>
             </div>
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-col items-start gap-2 sm:items-end">
+              <div className="flex flex-wrap items-center gap-2">
                 <div className="flex items-center h-8 rounded-md border border-input bg-background overflow-hidden">
                   <input
                     type="number"
@@ -604,8 +609,8 @@ export default function CampaignPage({ params }: { params: Promise<{ id: string 
                 )}
               </div>
             )}
-            <Table>
-              <TableHeader>
+            <Table containerClassName="max-h-[60vh] xl:max-h-[66vh]">
+              <TableHeader className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card [&_th]:backdrop-blur">
                 <TableRow>
                   <TableHead>Invite</TableHead>
                   <TableHead>Tags</TableHead>

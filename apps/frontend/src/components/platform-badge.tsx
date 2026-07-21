@@ -8,17 +8,17 @@ const STYLES: Record<string, { label: string; className: string }> = {
   whatsapp: {
     label: "WhatsApp",
     className:
-      "bg-emerald-100 text-emerald-900 hover:bg-emerald-100 border-emerald-200",
+      "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
   },
   discord: {
     label: "Discord",
     className:
-      "bg-indigo-100 text-indigo-900 hover:bg-indigo-100 border-indigo-200",
+      "bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-500/30",
   },
   slack: {
     label: "Slack",
     className:
-      "bg-purple-100 text-purple-900 hover:bg-purple-100 border-purple-200",
+      "bg-purple-500/10 text-purple-700 dark:text-purple-300 border-purple-500/30",
   },
 };
 

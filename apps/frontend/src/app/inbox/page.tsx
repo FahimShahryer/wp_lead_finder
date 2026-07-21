@@ -847,7 +847,9 @@ function MessageBubble({
 
 // ---------- Ban-prevention reminder ----------
 
-export function BanReminder() {
+// Not exported: a page.tsx may only export a default component + reserved
+// Next.js fields. A stray `export` here fails the production `next build`.
+function BanReminder() {
   return (
     <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-900 dark:text-amber-200">
       <div className="flex items-start gap-2">
